@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -60,17 +59,12 @@ func sr9PhoneOff(t *testing.T) (*Server, string, store.Info, func() int) {
 
 // The user replies from the phone to a stopped session while `eagent serve`
 // is stopping (rememberHosted has set stopping; Shutdown waits on the runs,
-// and the reply watcher stops only after). The watcher resumes it for the
-// reply (Server.Resume); host answers errStopping, whose words are meant
-// for the page ("send it again once it is back"), and the watcher posts
-// them to the thread as its note: "eagent could not resume this session
-// for your reply yet: eagent is stopping; send it again once it is back.
-// It keeps trying every minute." It keeps the reply and writes it down for
-// the next watcher (keptFile), which resumes the session with it. The note
-// tells the user to send again words eagent kept: done as told, the
-// session takes the reply twice (the kept one, then the copy). Nothing of
-// this is on main, which had no stopping.
-func TestSR9WebAPhoneReplyDuringShutdownIsToldToSendAgainAndKept(t *testing.T) {
+// and the reply watcher stops only after). The watcher's resume is refused
+// (integration.ErrStopping): nothing is posted to the thread and nothing
+// is kept, so the reply is still the thread's latest message for the next
+// server's sweep. (A note used to tell the user to send it again, while
+// the reply was also kept: done as told, the session took it twice.)
+func TestSR9WebAPhoneReplyDuringShutdownIsLeftInItsThread(t *testing.T) {
 	s, project := newTestServer(t)
 	t.Setenv("EAGENT_FINALECHAT", "")
 	sess := newSession(t, project)
@@ -109,24 +103,30 @@ func TestSR9WebAPhoneReplyDuringShutdownIsToldToSendAgainAndKept(t *testing.T) {
 	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
 	// The serve's shutdown has begun.
 	s.rememberHosted()
+	left := make(chan struct{}, 8)
 	ctx, cancel := context.WithCancel(context.Background())
-	stop := integration.StartResumeWatcher(ctx, project, s, func(string, ...any) {})
-	var note string
+	stop := integration.StartResumeWatcher(ctx, project, s, func(format string, _ ...any) {
+		if strings.Contains(format, "left in its thread for the next eagent") {
+			left <- struct{}{}
+		}
+	})
 	select {
-	case note = <-posted:
+	case <-left:
 	case <-time.After(20 * time.Second):
 		cancel()
 		stop()
-		t.Fatal("setup: the watcher posted nothing")
+		t.Fatal("the watcher never left the reply for the next eagent")
 	}
 	cancel()
-	stop() // the watcher stops: it writes down the replies it keeps
-	raw, _ := os.ReadFile(filepath.Join(project, ".agents", "eagent", "finalechat-state", "resume-watch-kept.json"))
-	kept := strings.Contains(string(raw), `"m1"`)
-	if strings.Contains(note, "send it again") && kept {
-		t.Fatalf("the phone was told %q, and the reply was kept for the next watcher (kept file: %s): the user is told to send again words eagent resumes the session with after the restart, and sending them again doubles them", note, strings.TrimSpace(string(raw)))
+	stop()
+	select {
+	case note := <-posted:
+		t.Fatalf("the thread was told %q about a reply the next eagent takes", note)
+	default:
 	}
-	t.Logf("note %q kept %v", note, kept)
+	if s.isHosted(sess.ID) {
+		t.Fatal("the session was resumed during the shutdown")
+	}
 }
 
 // sr9Stop stops the run of the session s hosts and waits for its end.
@@ -251,23 +251,5 @@ func (f *k18Accounts) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"message":{"id":"m"},"thread":{"id":"t"}}`))
 	default:
 		_, _ = w.Write([]byte(`{"thread":{"id":"t"}}`))
-	}
-}
-
-// A reply from the phone during this server's shutdown resumes nothing,
-// and its answer says what is true for the phone: the reply is kept, and
-// there is nothing to send again (errStopping's words are the page's).
-func TestK18APhoneReplyDuringTheShutdownIsToldItIsKept(t *testing.T) {
-	s, project := newTestServer(t)
-	info := r11Session(t, project)
-	s.resuming.Lock()
-	s.stopping = true
-	s.resuming.Unlock()
-	err := s.Resume(info.ID, integration.PhoneMessage{ID: "reply-1", Text: "are you there?"})
-	if err == nil || strings.Contains(err.Error(), "send it again") || !strings.Contains(err.Error(), "kept") || !strings.Contains(err.Error(), "nothing to send again") {
-		t.Fatalf("answered %v", err)
-	}
-	if s.isHosted(info.ID) {
-		t.Fatal("the session was resumed during the shutdown")
 	}
 }

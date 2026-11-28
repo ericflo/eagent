@@ -389,16 +389,6 @@ func allText(msgs []map[string]any) string {
 	return b.String()
 }
 
-func countRole(msgs []map[string]any, role string) int {
-	n := 0
-	for _, m := range msgs {
-		if m["role"] == role {
-			n++
-		}
-	}
-	return n
-}
-
 // fakeSeat stands in for an agent in a terminal: whatever is sent to it is
 // recorded, and it answers each message with one finished turn.
 type fakeSeat struct {

@@ -92,27 +92,6 @@ func TestSR8WatcherReconnectingWithThePhoneOffSaysNothing(t *testing.T) {
 	}
 }
 
-// The same across a restart of the serve: the stopping watcher writes the
-// promised reply down (the kept file), and the next serve starts with the
-// phone off in the project's file. Its watcher still watches, takes the
-// file up and resumes the session with the reply.
-func TestSR8WatcherStartingWithThePhoneOffSaysNothing(t *testing.T) {
-	project, fr, w := sr8Promised(t)
-	if err := w.retries.writeDown(project, t.Logf); err != nil {
-		t.Fatal(err)
-	}
-	sr8PhoneOff(t, project)
-	host := &k1Host{ResumeHost: &fakeResumeHost{hosted: map[string]bool{}}, next: make(chan PhoneMessage, 4)}
-	ctx, cancel := context.WithCancel(context.Background())
-	stop := StartResumeWatcher(ctx, project, host, t.Logf)
-	m, ok := k1Next(t, host)
-	cancel()
-	stop()
-	if !ok || m.ID != "m1" || r11Told(fr, "stopped trying") != 0 {
-		t.Fatalf("the next serve, with the phone off in the file: resumed %#v (%v), posted %q", m, ok, fr.posted())
-	}
-}
-
 // k5Watch is a stopped session whose reply carries shot.png, which cannot
 // be fetched (404), and a watcher for it on a service that records posts.
 func k5Watch(t *testing.T, failures int) (project string, fr *r10Front, host *flakyResumeHost, w *resumeWatcher) {

@@ -1255,14 +1255,6 @@ var (
 // started is the ledger as this run's first write starts it (startPhone).
 func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 	defer p.wg.Done()
-	// The poll stops as the session ends, and cannot know it read all that
-	// was sent before the closing note: its last read may not have come
-	// back, a message it left for the next run (p.left) or read once the
-	// loop had closed was not taken in, and a fetch the shutdown cut off
-	// left its message. So what may have waited is looked for by the reply
-	// watcher once the session has stopped; it takes only what the record
-	// shows untaken, so nothing is taken twice.
-	defer integration.LeftForNextRun(r.projectPath(), r.sess.ID, true, r.ui.Log)
 	backoff := time.Second
 	var floor time.Duration // pacing when the server answers at once with nothing
 	saidRecreated := false

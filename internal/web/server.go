@@ -182,35 +182,12 @@ func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	if s.isHosted(info.ID) || alive(info.Path) {
 		return ErrRunning
 	}
-	if err := s.host(info.Path, s.phoneResumeOptions(msg), "", "", true); err != nil {
-		if errors.Is(err, errStopping) {
-			// During this server's shutdown nothing is started, and the
-			// reply is kept (errReplyKept).
-			return errReplyKept
-		}
-		return err
-	}
-	return nil
+	return s.host(info.Path, s.phoneResumeOptions(msg), "", "", true)
 }
 
 // ErrRunning is Resume's answer for a session that is already running, here
 // or in another process: the reply is its own mirror's to read.
 var ErrRunning = errors.New("the session is running; its own mirror reads the thread")
-
-// errReplyKept is Resume's answer during this server's shutdown, said to
-// the phone: errStopping (errors.Is), in words true for a reply, which the
-// reply watcher keeps and the session takes when eagent is back
-// (errStopping's words are the page's, which keeps the words for the user
-// to send again).
-var errReplyKept error = replyKept{}
-
-type replyKept struct{}
-
-func (replyKept) Error() string {
-	return "eagent is stopping; your reply is kept, and the session takes it when eagent is back, so there is nothing to send again"
-}
-
-func (replyKept) Unwrap() error { return errStopping }
 
 // phoneResumeOptions are the options a session is resumed with for a
 // message the user sent from the phone.
@@ -679,7 +656,11 @@ func (s *Server) deliveredAnswer(how, inbox string) map[string]any {
 	return out
 }
 
-var errStopping = errors.New("eagent is stopping; send it again once it is back")
+// errStopping: nothing is started once this server's shutdown has begun.
+// The page keeps the words for the user to send again; the reply watcher
+// leaves a reply from the phone in its thread for the next server
+// (integration.ErrStopping).
+var errStopping = fmt.Errorf("%w; send it again once it is back", integration.ErrStopping)
 
 // deliverCode is the status of a failed deliver.
 func deliverCode(err error) int {
