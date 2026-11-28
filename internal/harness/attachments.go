@@ -81,6 +81,7 @@ func (r *Runtime) messageAttachments(raw any) ([]event.Attachment, error) {
 		// This is the one path that sends bytes off the machine, so the file
 		// must really be where the session works, not merely named as if it
 		// were: symlinks are followed before the check.
+		written := abs
 		if real, err := filepath.EvalSymlinks(abs); err == nil {
 			abs = real
 		}
@@ -89,7 +90,7 @@ func (r *Runtime) messageAttachments(raw any) ([]event.Attachment, error) {
 		// Only a picture: a named file of any other kind stays.
 		byName := false
 		if !r.sendable(abs) {
-			if !r.named(abs) {
+			if !r.named(written, abs) {
 				return nil, fmt.Errorf("attachment %s is outside the project and the agent's folder, and the agent did not report it as a picture it made", p)
 			}
 			byName = true
@@ -264,10 +265,11 @@ func (r *Runtime) viewImage(p string) (event.Attachment, error) {
 	// the rule a sent file is: the picture is where the session works, an
 	// agent reported it, or the user named it. Symlinks are followed
 	// before the check.
+	written := abs
 	if real, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = real
 	}
-	if !r.sendable(abs) && !r.named(abs) {
+	if !r.sendable(abs) && !r.named(written, abs) {
 		return event.Attachment{}, fmt.Errorf("%s is outside the project and the agent's folder, and neither the agent nor the user named it. Ask the user for the path if they want you to look at it", p)
 	}
 	st, err := os.Stat(abs)
@@ -391,9 +393,10 @@ func findByName(root, name string, maxDepth int) string {
 // absolute path or one under ~) in a message, an answer, a progress line or
 // a turn report. The user's word is leave to look at a file wherever it
 // is, and an agent that names a picture mid-turn (a screenshot it saved
-// under /tmp, say) has not finished the turn that would list it. Not on
-// the loop goroutine.
-func (r *Runtime) named(abs string) bool {
+// under /tmp, say) has not finished the turn that would list it. written
+// is the path as the tool was given it, abs the file it resolves to. Not
+// on the loop goroutine.
+func (r *Runtime) named(written, abs string) bool {
 	var texts []string
 	r.sync(func() {
 		for _, ev := range r.st.Events {
@@ -410,21 +413,29 @@ func (r *Runtime) named(abs string) bool {
 			}
 		}
 	})
-	// A path with a space in it is not one word: it counts when the text
-	// holds it whole, as written or under ~, with nothing of a longer
-	// path on either side.
-	whole := []string{abs}
-	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(abs, home+string(filepath.Separator)) {
-		whole = append(whole, "~"+strings.TrimPrefix(abs, home))
+	// The path counts when a text holds it whole, as the tool was given
+	// it or as it resolves, absolute or under ~, with nothing of a longer
+	// path on either side: so it may have a space in it, or stand in
+	// quotes, in a Markdown link or after a "=".
+	whole := []string{written, abs}
+	if home, err := os.UserHomeDir(); err == nil {
+		homes := []string{home}
+		if real, err := filepath.EvalSymlinks(home); err == nil && real != home {
+			homes = append(homes, real)
+		}
+		for _, p := range []string{written, abs} {
+			for _, h := range homes {
+				if strings.HasPrefix(p, h+string(filepath.Separator)) {
+					whole = append(whole, "~"+strings.TrimPrefix(p, h))
+				}
+			}
+		}
 	}
 	pathByte := func(c byte) bool {
 		return c == '/' || c == '_' || c == '-' || c == '.' || c == '~' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80
 	}
 	for _, text := range texts {
 		for _, w := range whole {
-			if !strings.Contains(w, " ") {
-				continue // the words below cover it
-			}
 			for from := 0; ; {
 				i := strings.Index(text[from:], w)
 				if i < 0 {
@@ -440,6 +451,8 @@ func (r *Runtime) named(abs string) bool {
 				from = i + 1
 			}
 		}
+		// A word that is another way to write the same file (through a
+		// link, or with a ".." in it) names it too.
 		for _, word := range strings.Fields(text) {
 			word = strings.Trim(word, "\"'`()[]<>,;:!?")
 			if !strings.HasPrefix(word, "/") && !strings.HasPrefix(word, "~") {
