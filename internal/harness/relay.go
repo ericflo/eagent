@@ -2740,7 +2740,16 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 		i = j
 	}
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
-	var texts []string
+	// waits: the record has no word of how a send of it went. The brief is
+	// such a message's only way to the new agent, and the switch leaves it
+	// without an outcome on that account (briefCarried): it is quoted
+	// whole, however many came after it.
+	type quote struct {
+		text  string
+		waits bool
+	}
+	var texts []quote
+	bySeq := map[int64]int{}
 	// The agents the brief hands over from, each the holder of its name
 	// from its start (a name can be in the chain twice, a quick switch
 	// back, each time with the agent that held it then).
@@ -2781,6 +2790,9 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 			continue
 		}
 		if d.From != "user" || quoted[d.ID] || pending[d.ID] || d.Seq > 0 && quotedSeq[d.Seq] {
+			if i, ok := bySeq[d.Seq]; ok && d.From == "user" && d.Seq > 0 && !pending[d.ID] && !r.hasOutcome(d.ID) {
+				texts[i].waits = true // sent again, and this send of it waits
+			}
 			continue
 		}
 		if at := r.st.RelayAt(d.Name, ev.Seq); at == nil {
@@ -2796,15 +2808,25 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 		quoted[d.ID] = true
 		if d.Seq > 0 {
 			quotedSeq[d.Seq] = true
+			bySeq[d.Seq] = len(texts)
 		}
-		texts = append(texts, d.Text)
+		texts = append(texts, quote{d.Text, !r.hasOutcome(d.ID)})
 	}
 	if len(texts) > 12 {
-		texts = texts[len(texts)-12:]
-		b.WriteString("(the latest 12)\n")
+		earlier := len(texts) - 12
+		kept := slices.DeleteFunc(slices.Clone(texts[:earlier]), func(q quote) bool { return !q.waits })
+		if texts = append(kept, texts[earlier:]...); len(kept) > 0 {
+			b.WriteString("(the latest 12, and before them the earlier ones not yet shown as read)\n")
+		} else {
+			b.WriteString("(the latest 12)\n")
+		}
 	}
-	for _, t := range texts {
-		b.WriteString("- " + clipRunes(strings.ReplaceAll(strings.TrimSpace(t), "\n", "\n  "), 3000) + "\n")
+	for _, q := range texts {
+		text := strings.ReplaceAll(strings.TrimSpace(q.text), "\n", "\n  ")
+		if !q.waits {
+			text = clipRunes(text, 3000)
+		}
+		b.WriteString("- " + text + "\n")
 	}
 	if ho.report != "" {
 		fmt.Fprintf(&b, "\n%s's last report:\n%s\n", ho.reportBy, clipRunes(ho.report, 6000))
