@@ -452,6 +452,7 @@ func (r *Runtime) passedSends() map[int64]string {
 // attentionTail says what an agent needs, from the newest event that is
 // still owed a look.
 func (r *Runtime) attentionTail(fallback string) string {
+	late := "" // an agent whose send in doubt has arrived since
 	for i := len(r.st.Events) - 1; i >= 0; i-- {
 		ev := r.st.Events[i]
 		if ev.Seq <= r.turns.seen {
@@ -484,6 +485,12 @@ func (r *Runtime) attentionTail(fallback string) string {
 					return "" // the user's message it carried: userTail says how it went
 				}
 			}
+			if ok && r.st.SendOutcome(d.ID) == state.SendArrived {
+				// Its terminal's later word: it arrived (the conversation
+				// says so too).
+				late = who
+				continue
+			}
 			if ok && state.DeliveryOutcome(d) == state.SendNotSent {
 				return "A message to " + who + " did not go; nothing of it reached it. Send it again (relay_forward sends a message of the user's again as written) or say what is wrong."
 			}
@@ -491,6 +498,9 @@ func (r *Runtime) attentionTail(fallback string) string {
 		case event.RelayLimit:
 			return who + "'s usage budget changed. Tell the user if it stops the work or soon will; otherwise hold."
 		}
+	}
+	if late != "" {
+		return "The message to " + late + " that was in doubt has arrived after all. Nothing needs doing about it."
 	}
 	return fallback + " needs attention; see above."
 }

@@ -163,8 +163,8 @@ func TestK2ANotSentFromTheSeatARestartReplacesIsKept(t *testing.T) {
 // Review 15, finding 6. Codex's transcript showed a message arriving just
 // as a model change restarted it; the seat had that arrival in hand when
 // it was killed, and its watcher hands it over only after the new agent is
-// up. The restart waits for the old seat's news: the message arrived, and
-// it is not also reported unconfirmed.
+// up. The restart settles the message as unconfirmed; the old seat's
+// arrival is then the newer word, and the message ends arrived.
 func TestK2AnArrivalTheReplacedSeatStillHadIsKept(t *testing.T) {
 	seat := newK2FeedSeat(t)
 	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)

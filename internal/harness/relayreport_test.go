@@ -3,6 +3,7 @@ package harness
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/state"
@@ -103,6 +104,22 @@ func TestRelayReportTooLongForOnePostIsClipped(t *testing.T) {
 	kept := strings.TrimSuffix(body, note)
 	if kept == body || len(kept) > phoneReportMax || !strings.HasPrefix(report, kept+"\n") || len(kept) < phoneReportMax-200 {
 		t.Fatalf("the post is %d bytes and ends %q; want the report's first lines up to the bound, then the note", len(body), body[len(body)-70:])
+	}
+}
+
+// A report over the bound whose only line end is near its start (a
+// heading, then one long line: a minified dump, a long log line) is cut
+// at the bound, not at that line end: the phone gets the report up to the
+// bound, not its heading alone.
+func TestRelayReportWithOneEarlyLineEndIsClippedAtTheBound(t *testing.T) {
+	report := "Result:\n" + strings.Repeat("é", 100<<10)
+	_, fp := relayReportSession(t, report, 20000)
+	waitFor(t, "the report's post", func() bool { return len(relayReports(fp)) == 1 })
+	body, _ := relayReports(fp)[0]["body"].(string)
+	const note = "\n\n_(clipped; the whole report is in the session's record)_"
+	kept := strings.TrimSuffix(body, note)
+	if kept == body || len(kept) > phoneReportMax || len(kept) < phoneReportMax-4 || !strings.HasPrefix(report, kept) || !utf8.ValidString(kept) {
+		t.Fatalf("the phone got %d bytes of a %d-byte report", len(kept), len(report))
 	}
 }
 

@@ -282,7 +282,7 @@ func TestMain(m *testing.M) {
 	}
 	agentInstalled = func(string) bool { return true }
 	relay.OfflineCatalogs()
-	wakeSettle, keysSettle = 0, 0
+	wakeSettle, keysSettle, repickGrace = 0, 0, 0
 	// The phone's status line is written at most every 2.5 seconds; a test
 	// that waits for a status would wait that out after every change.
 	statusMinGap = 20 * time.Millisecond

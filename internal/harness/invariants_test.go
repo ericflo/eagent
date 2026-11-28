@@ -85,6 +85,7 @@ var invRebuiltOtherwise = map[string]string{
 	"retryAt":         "as failures",
 	"failSeq":         "as failures",
 	"failTold":        "as failures: after two more failed calls the user is told again",
+	"heldCut":         "as failures: a message a failed call cut off unanswered is taken up by the retry of the same run",
 	"overflowed":      "a provider's refusal for size is not recorded: a resumed session sends the refused request once more before it restarts",
 	"promptTokens":    "as overflowed: the size the refusal raised is not recorded",
 	"dossierFailedAt": "the back-off after a dossier that could not be written; a new process tries at once",

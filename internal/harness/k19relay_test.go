@@ -32,9 +32,8 @@ func sr11HeldForRestart(t *testing.T) (*Runtime, *gatedLaunches, string) {
 // then Codex is stopped (the stop cuts the start: stopLaunches), and eagent
 // is cut off before the start ends. The message was never typed. Uncut,
 // finishLaunch records it not_sent ("the agent could not start again").
-// At the resume, settleEnded only treats as held what was recorded after
-// the stop's relay.end; this one was recorded before it, so it is settled
-// as typed into the stopped agent: unconfirmed.
+// The resume records the same: the record shows it held for a start that
+// never came up (state.NeverTyped).
 func TestSR11RelayResumeCallsASendHeldForARestartThenStoppedUnconfirmed(t *testing.T) {
 	rt, g, id := sr11HeldForRestart(t)
 	if text := recv(t, relayToolAsync(rt, map[string]any{"action": "stop"}), "stop"); !strings.Contains(text, "Stopped") {

@@ -136,22 +136,17 @@ func TestK12AStoppedAgentsLateMoveDoesNotLandOnTheNewRecord(t *testing.T) {
 	}
 }
 
-// SR9-2, the known limit "a send typed into an agent that is then stopped
-// stays unresolved ... A fresh start under the name leaves it unresolved",
-// through a process that dies in the stop's wait. relay_control stop
-// records relay.end at once and settles what Codex was typed only once its
-// seat has drained (up to 30 s of kill and 15 s of drain). eagent is cut
-// off in that wait (killed, the machine sleeps, a crash). The resume skips
-// the ended relay (reattachRelays reads only active ones), and a fresh
-// Codex started under the name settles nothing of the record it replaces:
-// the message typed into the stopped Codex has no outcome for good.
-func TestSR9RelayACutDuringAStopsDrainLeavesTheSendUnresolvedAfterAFreshStart(t *testing.T) {
+// relay_control stop records relay.end and settles what Codex was typed in
+// the same step. eagent is cut off right after (killed, the machine
+// sleeps, a crash), resumes, and a fresh Codex is started under the name:
+// the message typed into the stopped Codex has its outcome on the record.
+func TestASendTypedIntoAStoppedAgentHasAnOutcomeAfterACutAndAFreshStart(t *testing.T) {
 	seat := newK2FeedSeat(t)
 	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
 	rt := newLaunchRuntime(t)
 	_, id := k2Forward(t, rt, seat, "run the tests", "queue")
 	relayToolAsync(rt, map[string]any{"action": "stop"})
-	seat.waitGone(t) // relay.end is on the record; the seat has not drained
+	seat.waitGone(t) // relay.end is on the record
 	ended := false
 	rt.sync(func() { ended = rt.st.Relays["codex"].Ended })
 	if !ended {

@@ -97,10 +97,14 @@ type turnState struct {
 	// seen is the newest event eagent has looked at, whether or not the
 	// look left a record. wakes holds, per kind, the newest event that asks
 	// for a look; one newer than seen is still owed.
-	seen   int64
-	wakes  [wakeKinds]int64
-	worthy int64 // the newest event that shows in the conversation and is not eagent's own
-	settle *time.Timer
+	seen  int64
+	wakes [wakeKinds]int64
+	// heldCut is the message kept for eagent that a turn showed the model
+	// and a failed call cut off before it was answered (0 for none): the
+	// turn that tries again takes it up, and a hold there is sent back.
+	heldCut int64
+	worthy  int64 // the newest event that shows in the conversation and is not eagent's own
+	settle  *time.Timer
 
 	// What the user last heard from eagent, and what eagent had seen when
 	// it said it. saidAt counts a notice eagent wrote by itself (Auto: a
@@ -349,8 +353,7 @@ func (r *Runtime) noteWake(ev event.Event) {
 	}
 	t.wakes[k] = ev.Seq
 	if k == wakeUser {
-		// A message of theirs still unanswered stays owed: the look at
-		// what they write now is told about it too (tail.go).
+		// What they write now is owed a closing word of its own.
 		t.finalAsked = false
 	}
 	if r.ending || wakeSettle <= 0 {
@@ -754,8 +757,18 @@ func (r *Runtime) turn(w wake) {
 				}
 			}
 			if fresh {
-				if h := r.heldSince(r.turns.seen); h > 0 {
-					// Not answered by what the turn did before it came.
+				h := r.heldSince(r.turns.seen)
+				if first {
+					if h == 0 {
+						h = r.turns.heldCut
+					}
+					r.turns.heldCut = 0
+				}
+				if h > 0 {
+					// Not answered by what the turn did before it came,
+					// and one that came while the turn ran is owed its
+					// own reminder.
+					reminded = reminded && h == held
 					held = h
 					tc.handled = tc.handled && first
 				}
@@ -823,6 +836,9 @@ func (r *Runtime) turn(w wake) {
 				p := r.turnFailed(err, covered, answers, w)
 				answers = answers && r.turns.failures == counted
 				r.turns.threadDue = r.turns.threadDue || w.thread
+				if held > 0 && !tc.handled {
+					r.turns.heldCut = held
+				}
 				// The closing turn of a session that ends on this
 				// (sessionPlan, as turnFailed's log has it) has had its
 				// word (the model's, or eagent's own here): nothing is owed

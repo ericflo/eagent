@@ -135,6 +135,10 @@ type State struct {
 	relayHolders map[string][]*Relay
 	// sendOutcomes is where each send got to, by send id (see SendOutcome).
 	sendOutcomes map[string]SendOutcome
+	// lateArrivals are the relay.delivered events, by seq, that say a send
+	// arrived after an earlier one had said it did not: the conversation
+	// says so (relayNotice), since it was told the earlier word.
+	lateArrivals map[int64]bool
 
 	// lastMoveSeq is the newest thing an agent did that the user might be
 	// asked about: a finished turn, a dialog it is stuck on, an exit.

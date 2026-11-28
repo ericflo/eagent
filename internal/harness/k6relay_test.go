@@ -43,11 +43,9 @@ func (s *sr3CommandSeat) Send(id, text, mode string) (_ string, err error) {
 	s.fakeSeat.mu.Lock()
 	s.fakeSeat.sent = append(s.fakeSeat.sent, text)
 	s.fakeSeat.mu.Unlock()
-	// As the seat does since 9888cae: the delivered goes out once a look
-	// has read what pi did with the command, after the move it found; it
-	// is quiet (KindQuiet, at the end of emit) only after both.
+	// As the seat does: typed is delivered; its next look finds the move.
+	s.emit(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true})
 	s.emit(relay.Event{Kind: relay.KindInner, InnerID: s.movedTo},
-		relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true},
 		relay.Event{Kind: relay.KindState, State: "idle"})
 	return "typed the command into pi", nil
 }
@@ -70,17 +68,14 @@ func sr3PiRuntime(t *testing.T) *Runtime {
 	return rt
 }
 
-// SR3-1. pi is idle on session sess-old. eagent types pi's own /new into it
+// pi is idle on session sess-old. eagent types pi's own /new into it
 // (relay_send) and, while that is being typed, the user picks another
-// effort in the thread's settings. The change waits ("it starts again ...
-// once that is typed", 197a5b8) and is applied the instant the command's
-// arrival is recorded (appendOutcome): the restart's session id is read
-// from the record then (prepareLaunch), before pi has run /new or the
-// seat's next look has seen the move, and the old seat's later news is no
-// longer the relay's. pi is started again with --session-id sess-old: the
-// conversation /new left (the eighth review's fault, by a new path). The
-// /new is reported delivered and its effect is undone.
-func TestSR3AChangeWaitingOnATypedNewRestartsPiIntoTheSessionItLeft(t *testing.T) {
+// effort in the thread's settings. The change waits for the command, and
+// is not applied the instant the command is recorded typed: the seat's
+// next look, moments later, says which session /new moved pi to, and the
+// restart (repickGrace after) opens that one, not the one /new left.
+func TestAChangeWaitingOnATypedNewOpensTheSessionNewMovedTo(t *testing.T) {
+	setFor(t, &repickGrace, 100*time.Millisecond)
 	seat := &sr3CommandSeat{fakeSeat: newFakeSeat("…"), entered: make(chan string, 4), gate: make(chan struct{}), movedTo: "sess-new"}
 	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
 	rt := sr3PiRuntime(t)

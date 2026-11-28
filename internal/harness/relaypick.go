@@ -3,6 +3,7 @@ package harness
 import (
 	"fmt"
 	"maps"
+	"time"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
@@ -99,9 +100,10 @@ func relayRepicks(before, after map[string]runtimecontrol.RelayRoute) map[string
 }
 
 // repickRelay gives a running relay another model or effort: now, unless
-// the record shows the agent in a turn or starting, or still waits on a
-// send to it (one on its way, or held for the end of its turn, starts the
-// agent's next turn); then when it is next between turns
+// the record shows the agent in a turn or starting, still waits on a send
+// to it (one on its way, or held for the end of its turn, starts the
+// agent's next turn), or shows it idle with something new of it moments
+// ago (repickGrace); then when it is next between turns
 // (applyWaitingRepick). It says which. Loop goroutine.
 func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 	rel := r.st.Relays[name]
@@ -131,7 +133,7 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 			return rel.Who() + " is already starting again with " + r.pickText(rel, pick) + ".", nil
 		}
 		return rel.Who() + " already runs that.", nil
-	case job != nil || rel.State == "working" || rel.State == "starting" || rel.Awaited() > 0:
+	case job != nil || rel.State == "working" || rel.State == "starting" || rel.Awaited() > 0 || rel.State == "idle" && time.Since(rel.LastEventAt) < repickGrace:
 		r.setWaitingPick(name, pick)
 		r.syncRelaySettings()
 		r.publishRelayMeta() // the thread header says a change is waiting
@@ -142,8 +144,11 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 			return rel.Who() + " is in a turn;" + then + " when the turn ends, on the same conversation.", nil
 		case rel.State == "starting":
 			return rel.Who() + " is still starting;" + then + " once it is ready and between turns, on the same conversation.", nil
+		case rel.Awaited() > 0:
+			return rel.Who() + " has a message on its way;" + then + " when the turn that message starts ends, on the same conversation.", nil
 		}
-		return rel.Who() + " has a message on its way;" + then + " when the turn that message starts ends, on the same conversation.", nil
+		r.applyWaitingRepick(name) // arms the grace's timer
+		return rel.Who() + " was active a moment ago;" + then + " in a few seconds, once it is plainly between turns, on the same conversation.", nil
 	}
 	if err := r.restartRelayWith(rel, pick); err != nil {
 		return "", err
@@ -210,10 +215,21 @@ func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick) error {
 	return nil
 }
 
+// repickGrace is how long the record must have had nothing new of an agent
+// before a change that waited is applied. What the agent does next shows
+// within moments: a message it took into its own queue while it worked
+// (Claude Code does, and the record has it arrived) starts the next turn
+// right after the turn's end, and one of its own commands just typed
+// (/new, /clear) moves it to another session. A restart in those moments
+// would kill the agent with the message in hand, or open the session the
+// command left. Tests zero it.
+var repickGrace = 5 * time.Second
+
 // applyWaitingRepick starts a relay again with a change that waited, once
-// the record shows it between turns with no send to it still on its way.
-// Looked at after each thing the record takes of the relay that can end
-// the wait: a state, a turn's end, a send that did not go. Loop goroutine.
+// the record shows it between turns with no send to it still on its way,
+// and nothing new of it for repickGrace. Looked at after each thing the
+// record takes of the relay that can end the wait: a state, a turn's end,
+// a send that did not go or a command typed. Loop goroutine.
 func (r *Runtime) applyWaitingRepick(name string) {
 	pick, ok := r.relayNext[name]
 	rel := r.st.Relays[name]
@@ -226,6 +242,10 @@ func (r *Runtime) applyWaitingRepick(name string) {
 		return
 	}
 	if r.relays.launch(name) != nil || rel.State != "idle" || rel.Awaited() > 0 {
+		return
+	}
+	if wait := repickGrace - time.Since(rel.LastEventAt); wait > 0 {
+		time.AfterFunc(wait, func() { r.post(func() { r.applyWaitingRepick(name) }) })
 		return
 	}
 	if err := r.restartRelayWith(rel, pick); err != nil {

@@ -17,9 +17,9 @@ import (
 // sr4CommandSeat is pi's seat taking one of pi's own commands while pi is
 // idle: the first send waits for the test (it is being typed), then, as
 // Seat.Send does for an idle agent whatever the mode, it is typed into the
-// prompt as a command; the seat's next look says pi moved (/new) and then
-// that the command was delivered (releaseHeld). pi stays idle, so no state
-// event follows (setDialogState says nothing for an unchanged state).
+// prompt as a command and reported delivered; the seat's next look says pi
+// moved (/new). pi stays idle, so no state event follows (setDialogState
+// says nothing for an unchanged state).
 type sr4CommandSeat struct {
 	*fakeSeat
 	entered chan string
@@ -39,8 +39,8 @@ func (s *sr4CommandSeat) Send(id, text, mode string) (_ string, err error) {
 	s.fakeSeat.sent = append(s.fakeSeat.sent, text)
 	s.fakeSeat.modes = append(s.fakeSeat.modes, mode)
 	s.fakeSeat.mu.Unlock()
-	s.emit(relay.Event{Kind: relay.KindInner, InnerID: "sess-new"},
-		relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true})
+	s.emit(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true})
+	s.emit(relay.Event{Kind: relay.KindInner, InnerID: "sess-new"})
 	return "typed the command into pi", nil
 }
 
@@ -66,18 +66,13 @@ func TestSR4StopSessionSettlesBeforeTheArrivalTheSeatAlreadyRead(t *testing.T) {
 	})
 }
 
-// SR4-1. pi is idle. pi's own /new is sent with delivery after_turn (the
-// phone's delivery choice, eagent.delivery, or relay_send's mode), and
-// while it is being typed the user picks another effort in the thread's
-// settings. pi is idle, so the seat types /new straight into its prompt
-// as a command; no turn follows. The change is told to wait "when the turn
-// that message starts ends" (heldBack calls the after_turn command "on its
-// way": typedCommand is false for an after_turn send), and when the
-// command's delivered comes, appendOutcome does not look at the change
-// again (again typedCommand is false). Nothing else will: pi stays idle on
-// its new session. The change waits until some later turn ends; on main a
-// change to an idle agent restarted it at once.
-func TestSR4AfterTurnCommandTypedIntoAnIdleAgentLeavesTheChangeWaitingForEver(t *testing.T) {
+// pi is idle. pi's own /new is sent with delivery after_turn (the phone's
+// delivery choice, eagent.delivery, or relay_send's mode), and while it is
+// being typed the user picks another effort in the thread's settings. pi
+// is idle, so the seat types /new straight into its prompt as a command;
+// no turn follows. The change waits for the command and is applied once it
+// is recorded typed: it does not wait for a turn that will not come.
+func TestAChangeWaitingOnAnAfterTurnCommandTypedIntoAnIdleAgentIsApplied(t *testing.T) {
 	seat := &sr4CommandSeat{fakeSeat: newFakeSeat("…"), entered: make(chan string, 4), gate: make(chan struct{})}
 	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
 	_ = g
@@ -111,8 +106,8 @@ func TestSR4AfterTurnCommandTypedIntoAnIdleAgentLeavesTheChangeWaitingForEver(t 
 		rt.sync(func() { done = rt.st.SendOutcome(id) == state.SendArrived })
 		return done
 	})
-	// The seat says it is quiet right after the delivered (KindQuiet), and
-	// that applies the change: a restart is under way once it is taken.
+	// The command's delivered applies the change: a restart is under way
+	// once it is taken.
 	var launching, waiting bool
 	var st string
 	var awaited int

@@ -12,17 +12,11 @@ import (
 
 // A turn of eagent's is typing a relay_send into the agent when the user
 // quits. The typing ends (here it fails part way, so the send "may have
-// gone") just after finish has begun. On main, relay_send typed in the
-// tool and recorded the failure through r.sync, which finish's drain runs:
-// the outcome is on the record before session.end and the turn ends at
-// once. Here the send's end comes through postNews, which once finish has
-// begun (loopDone) waits for finish's late loop; that loop is read only
-// after the drain, and only while a seat taken out of use is pending. So
-// the turn's relay_send waits for r.closed, the drain waits its whole grace
-// for the turn ("a model call did not stop in time"), and with no seat
-// retired the send's outcome is dropped: the record ends with the send and
-// no word on how it went.
-func TestSR8LoopAQuitWhileATurnTypesIntoTheAgentStallsAndDropsTheOutcome(t *testing.T) {
+// gone") just after finish has begun. As on main, how it ended is on the
+// record before session.end and the turn ends at once: the loop's one
+// queue is read by finish from its first step, so the drain does not wait
+// out its grace for the turn.
+func TestAQuitWhileATurnTypesIntoTheAgentRecordsTheOutcomeAtOnce(t *testing.T) {
 	seat := &heldSendSeat{fakeSeat: newFakeSeat("one"), entered: make(chan string, 4), result: make(chan error, 4)}
 	rt, _, done := r10Session(t, seat)
 	// The tool runs as a turn's does: on a goroutine the drain waits for.
@@ -215,19 +209,13 @@ func (s *sr8SlowSeat) Send(id, text, mode string) (string, error) {
 	return "", relay.ErrClosed
 }
 
-// SR8-1. relay_control stop settles what the stopped agent was typed once
-// its seat has drained and no send is being typed into it (retire); the
-// settle is settleExited of whatever record holds the relay's name when it
-// runs. The user's first message is still being typed into Codex when it
-// is stopped; the seat drains, the stop returns, and the user restarts
-// Codex (relay_control restart of the stopped relay) and sends a second
-// message, typed into the new Codex. Then the first send's typing ends:
-// the stop's settle runs now, against the new Codex's record, and reports
-// the second message "could not be confirmed: the agent was restarted
-// before its arrival showed" (a wake for eagent, may-not-have-arrived on
-// the phone) while the new agent runs and nothing restarted it; its
-// arrival then gives the send a second outcome.
-func TestSR8AStopsLateSettleReportsTheNewAgentsSend(t *testing.T) {
+// The user's first message is still being typed into Codex when it is
+// stopped; the stop settles what the stopped agent was typed there and
+// then. The user restarts Codex (relay_control restart of the stopped
+// relay) and sends a second message, typed into the new Codex. Then the
+// first send's typing ends: nothing of that touches the second message,
+// which has no outcome until its own arrival, and then one.
+func TestAStoppedAgentsSlowSendLeavesTheNewAgentsSendAlone(t *testing.T) {
 	slow := &sr8SlowSeat{k2FeedSeat: newK2FeedSeat(t), entered: make(chan struct{}), release: make(chan struct{})}
 	two := newK2FeedSeat(t)
 	g := useGatedLaunches(t, []relaySeat{slow, two}, nil)
@@ -283,16 +271,12 @@ func TestSR8AStopsLateSettleReportsTheNewAgentsSend(t *testing.T) {
 	}
 }
 
-// SR8-1, the known limit "a fresh start under the name leaves it
-// unresolved", which this pass set out to close: Codex was typed the
-// user's first message (not yet confirmed) and is typing the second when
-// it is stopped. The seat drains, the stop returns, and a fresh Codex is
-// started (relay_start, which takes the stopped relay's name). The second
-// send's typing ends after that: the stop's settle runs then, on the new
-// Codex's record, and the first message, typed into the stopped agent,
-// never gets an outcome: it stays on its way on the record for good (an
-// ended relay is not reattached).
-func TestSR8AStopsLateSettleLeavesTheStoppedAgentsSendUnresolved(t *testing.T) {
+// Codex was typed the user's first message (not yet confirmed) and is
+// typing the second when it is stopped. A fresh Codex is started
+// (relay_start, which takes the stopped relay's name), and the second
+// send's typing ends after that. The first message, typed into the stopped
+// agent, has one outcome: the stop settled it.
+func TestASendTypedIntoAStoppedAgentHasOneOutcomeAfterAFreshStart(t *testing.T) {
 	slow := &sr8SlowSeat{k2FeedSeat: newK2FeedSeat(t), entered: make(chan struct{}), release: make(chan struct{}), quick: 1}
 	two := newK2FeedSeat(t)
 	g := useGatedLaunches(t, []relaySeat{slow, two}, nil)

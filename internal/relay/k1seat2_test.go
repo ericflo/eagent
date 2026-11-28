@@ -64,12 +64,12 @@ func TestRV15ReplacedTranscriptArrivalIsConfirmed(t *testing.T) {
 	}
 }
 
-// rv15: words left on the parser's queue list by a message Claude took
-// into its running turn (enqueue then remove: the list never drops them)
-// mark a later prompt run off the queue with those words, though that
-// prompt is the first record of the seat's send (its enqueue line showed
-// Claude's paste placeholder).
-func TestRV15StaleQueuedWordsHideAPastedSendsArrival(t *testing.T) {
+// The person typed some words while Claude worked, and Claude took them
+// into that turn (enqueue, then remove). The seat then sends the same
+// words; Claude queues them as a paste (its enqueue line shows the paste
+// placeholder), and the prompt it later runs off its queue is the first
+// record of the seat's send: that prompt confirms it.
+func TestAPastedSendIsConfirmedByThePromptRunOffClaudesQueue(t *testing.T) {
 	long := "check the migration plan\nagainst the schema"
 	k1Case{"stale_entry_then_pasted_send",
 		nil,
@@ -106,21 +106,6 @@ func (c k1Case) runRV15(t *testing.T, after []string, last string) {
 	if ok := okDeliveries(drain(s.events)); !slices.Equal(ok, c.want) {
 		t.Fatalf("confirmed %v; want %v", ok, c.want)
 	}
-}
-
-// The same with a message Claude took off its queue and ran as a meta
-// line: the dequeue took its words off the list, so they mark nothing
-// later.
-func TestK1DequeuedWordsLeaveTheQueue(t *testing.T) {
-	long := "check the migration plan\nagainst the schema"
-	meta := `{"type":"user","isMeta":true,"timestamp":"` + stamp(time.Now()) + `","message":{"content":"check the migration plan against the schema"}}`
-	k1Case{"dequeued_ran_as_meta_then_pasted_send",
-		nil,
-		[]string{k1Queue("enqueue", long), k1TurnEnd(), k1Queue("dequeue", ""), meta, k1TurnEnd()},
-		[][2]string{{"r1", long}},
-		"",
-		[]string{"r1"},
-	}.runRV15(t, []string{k1Queue("enqueue", "[Pasted text #1 +1 lines]"), k1TurnEnd(), k1Queue("dequeue", "")}, claudeUser(time.Now(), long))
 }
 
 // Suspicions checked (round 15 reader), none failing.

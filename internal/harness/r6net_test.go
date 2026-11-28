@@ -91,7 +91,7 @@ func netModel(t *testing.T) *scripted {
 
 // netRuntime is a runtime whose primary is at primary and, when fallback
 // is not "", has one fallback there, with its loop served and every wait
-// of an outage shortened: rounds 5 to 20 ms apart, the others asked after
+// of an outage shortened: rounds 5 to 20 ms apart, the user told after
 // 40 ms.
 func netRuntime(t *testing.T, primary, fallback string) (*Runtime, *fakeUI) {
 	t.Helper()

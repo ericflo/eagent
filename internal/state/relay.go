@@ -309,9 +309,15 @@ func (s *State) applyRelay(ev event.Event) {
 		for _, h := range s.relayHolders[r.Name] {
 			delete(h.Undelivered, d.ID)
 		}
-		if _, known := s.sendOutcomes[d.ID]; known {
+		if was, known := s.sendOutcomes[d.ID]; known {
 			// The newest word on a send is how it ended: a late
 			// confirmation after one that gave up means it arrived.
+			if d.OK && (was == SendUnconfirmed || was == SendNotSent) {
+				if s.lateArrivals == nil {
+					s.lateArrivals = map[int64]bool{}
+				}
+				s.lateArrivals[ev.Seq] = true
+			}
 			s.sendOutcomes[d.ID] = DeliveryOutcome(d)
 		}
 	case event.RelayState:
@@ -499,6 +505,13 @@ func (s *State) relayNotice(ev event.Event, opts ViewOptions) string {
 		var d event.RelayDeliveredData
 		_ = ev.Decode(&d)
 		switch DeliveryOutcome(d) {
+		case SendArrived:
+			// Said only where the conversation holds an earlier word that
+			// it did not (a stop settled it before its terminal's last
+			// look was in).
+			if s.lateArrivals[ev.Seq] {
+				return fmt.Sprintf("[%s The message to %s (%s) arrived after all; it need not be sent again.]", ts, s.relayWho(d.Name, ev.Seq), d.ID)
+			}
 		case SendNotSent:
 			// Only records that say so: what older ones rendered stays.
 			return fmt.Sprintf("[%s A message to %s (%s) did not go; nothing of it reached the agent: %s]", ts, s.relayWho(d.Name, ev.Seq), d.ID, clip(d.Detail, detailChars))

@@ -100,10 +100,10 @@ func stopsWhenDone() reply {
 	return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop","reason":"the work is done"}`)}}
 }
 
-// A message the user addressed to eagent is always answered. A model that
-// holds is told once that holding is not an answer; if it still says
-// nothing it is woken again for that message alone until it has answered.
-func TestAMessageKeptForEagentIsNeverLeftUnanswered(t *testing.T) {
+// A model that holds on a message the user addressed to eagent is told
+// once, in the same turn, that holding is not an answer. Once it has
+// answered, nothing wakes it for that message again.
+func TestAHoldOnAMessageKeptForEagentIsSentBackOnce(t *testing.T) {
 	var mu sync.Mutex
 	reminded := 0
 	s := startSession(t, "", func(_ string, msgs []map[string]any) reply {

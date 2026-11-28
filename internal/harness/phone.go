@@ -465,7 +465,7 @@ func (r *Runtime) startPhone() {
 			p.setReceipt(r, stoppedAt, "eagent")
 		} else if outcomes {
 			p.mu.Lock()
-			p.publishReceipts(r) // it lets go of the lock
+			p.publishReceipts() // it lets go of the lock
 		}
 	}
 }

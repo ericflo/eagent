@@ -151,12 +151,12 @@ func (p *phone) setReceipt(r *Runtime, seq int64, status string) {
 			p.receipts = p.receipts[len(p.receipts)-maxReceipts:]
 		}
 	}
-	p.publishReceipts(r)
+	p.publishReceipts()
 }
 
 // publishReceipts sends the receipts to the thread, as they stand. Called
 // with p.mu held; it lets go of it.
-func (p *phone) publishReceipts(r *Runtime) {
+func (p *phone) publishReceipts() {
 	p.mu.Unlock()
 	p.enqueue(func(ctx context.Context) {
 		// On the worker, after the mirror post for a terminal message
@@ -230,11 +230,12 @@ func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 		if images == nil {
 			images = []string{}
 		}
-		// One post. A report too long for FinaleChat to take is clipped at
-		// a line's end and says so: the whole of it is in the record.
+		// One post. A report too long for FinaleChat to take is clipped and
+		// says so: the whole of it is in the record. The cut is at a line's
+		// end when one falls in the bound's second half, else at the bound.
 		if len(body) > phoneReportMax {
 			cut := strings.LastIndexByte(body[:phoneReportMax], '\n')
-			if cut <= 0 {
+			if cut < phoneReportMax/2 {
 				for cut = phoneReportMax; !utf8.RuneStart(body[cut]); cut-- {
 				}
 			}

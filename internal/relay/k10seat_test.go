@@ -8,15 +8,12 @@ import (
 	"time"
 )
 
-// SR9-1. c249eef takes a busy line that flickers for granted: a change of
-// Stuck needs two screen checks in a row. The quiet turn's end seen on the
-// screen (6827736) needs one: Claude's footer stays on screen while it
-// works, so one capture without the spinner line ends the turn, and
-// heldGrace later the message held for that turn's end is taken back from
-// the spool and reported not sent, "Claude's turn ended before it took
-// this message", while Claude is still in the turn whose Stop hook would
-// have handed it over.
-func TestSR9SeatOneFlickerEndsAQuietTurnAndTakesBackItsHeldMessage(t *testing.T) {
+// Claude's busy line can flicker: its footer stays on screen while it
+// works, and one capture can miss the spinner line. One such capture does
+// not end a quiet turn: the message held for that turn's end stays in the
+// spool for the Stop hook, and is not taken back and reported not sent
+// while Claude is still in the turn.
+func TestOneCaptureWithoutTheBusyLineDoesNotEndAQuietTurn(t *testing.T) {
 	saved, savedSettle := heldGrace, typeSettle
 	heldGrace, typeSettle = 0, 0
 	t.Cleanup(func() { heldGrace, typeSettle = saved, savedSettle })

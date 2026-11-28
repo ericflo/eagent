@@ -99,7 +99,7 @@ func TestRelayBriefGoesOnceAndStopEndsTheAgent(t *testing.T) {
 // about the session as the opening message is not typed into the agent; it
 // stays with eagent, which answers it. (The old reminder named the gone
 // `note` tool; the reminder that a kept message is owed an answer is
-// kept_test.go:TestAMessageKeptForEagentIsNeverLeftUnanswered.)
+// kept_test.go:TestAHoldOnAMessageKeptForEagentIsSentBackOnce.)
 func TestRelayOpeningQuestionAboutTheSessionStaysWithEagent(t *testing.T) {
 	t.Setenv("EAGENT_TEST_KEY", "x")
 	seat := newFakeSeat("Done.")

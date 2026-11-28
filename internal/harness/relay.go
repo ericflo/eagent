@@ -707,8 +707,6 @@ func (job *relayLaunch) run() {
 			job.takenBack = append(job.takenBack, id)
 		}
 	}
-	// The session to open, now that what the old seat saw is in: a move it
-	// reported counts (watchSeat).
 	innerID := job.innerID
 	taken := slices.Clone(job.takenBack)
 	job.seats.mu.Unlock()
@@ -733,10 +731,9 @@ func (r *Runtime) recordTakenBack(name string, ids []string) {
 }
 
 // oldSendSettle bounds how long a start waits for the send the agent it
-// replaces was typing to give up, and a start or a stop for all the old
-// seat saw to be recorded. Once the old terminal is closed that send fails
-// at its next step, and its watcher ends, well under a second. A variable
-// so tests can shorten it.
+// replaces was typing to give up. Once the old terminal is closed that
+// send fails at its next step, well under a second. A variable so tests
+// can shorten it.
 var oldSendSettle = 15 * time.Second
 
 // finishLaunch records how a start went and returns the relay's name. The
@@ -822,9 +819,8 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 			r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: job.replaces, State: "exited", Detail: clipRunes("it was stopped to start again and could not start: "+err.Error(), 2000)}))
 			r.settleExited(rel, waiting...)
 		case rel != nil && rel.Ended && job.wasActive:
-			// The relay this start replaced was stopped while it ran: the
-			// stop left what its agent was typed to its seat taken out of
-			// use, settled once no news of that agent is taken.
+			// The relay this start replaced was stopped while it ran:
+			// what its agent was typed and has not confirmed is settled.
 			r.settleExited(rel, waiting...)
 		}
 		for _, h := range held {
@@ -878,8 +874,9 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if rel := r.st.Relays[job.replaces]; job.replaces != "" && job.endOld == "" && rel != nil {
 		// A restart (of a running relay or of a stopped one): what was
 		// typed into the process that was stopped and not yet confirmed
-		// has nobody to confirm it once its seat has said all it saw.
-		// What is held for this start is typed below, by the new seat.
+		// is settled now; a later word from its old seat is the newer
+		// one. What is held for this start is typed below, by the new
+		// seat.
 		var waiting []string
 		for _, h := range held {
 			waiting = append(waiting, h.id)
@@ -2272,8 +2269,8 @@ func (r *Runtime) briefOf(ho *handover, pending map[string]bool) (string, map[st
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
 	// waits: the record has no word of how a send of it went. The brief is
 	// such a message's only way to the new agent, and the switch leaves it
-	// without an outcome on that account (briefCarried): it is quoted
-	// whole, however many came after it.
+	// without an outcome on that account: it is quoted whole, however many
+	// came after it.
 	type quote struct {
 		text  string
 		waits bool

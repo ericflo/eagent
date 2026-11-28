@@ -438,8 +438,8 @@ func newSeat(spec Spec, a Agent, host Host, target, innerID string) *Seat {
 		state: "starting", stateAt: time.Now(), handled: map[string]time.Time{}}
 }
 
-// Events delivers what the seat observes. It is closed when watching stops
-// and no Send is under way.
+// Events delivers what the seat observes. It is closed when watching
+// stops.
 func (s *Seat) Events() <-chan Event { return s.events }
 
 // Target is the terminal session name.
@@ -984,9 +984,8 @@ type commandRefuser interface {
 	refuses(command string) string
 }
 
-// IsAgentCommand is isAgentCommand for the harness, which words what holds a
-// waiting change from it: typed into the agent's prompt, such a command runs
-// at once and starts no turn.
+// IsAgentCommand is isAgentCommand for the harness: typed into the agent's
+// prompt, such a command runs at once and starts no turn.
 func IsAgentCommand(text string) bool { return isAgentCommand(text) }
 
 var agentCommand = regexp.MustCompile(`^/[A-Za-z][\w:-]*(\s|$)`)
@@ -1583,25 +1582,6 @@ func (s *Seat) closeEvents() {
 	if !s.eventsClosed {
 		s.eventsClosed = true
 		close(s.events)
-	}
-}
-
-// emitHeld sends a held event as watching ends (an exit or a close): into
-// events if they have room, so a close's stop does not win the race, else
-// as emitAside does.
-func (s *Seat) emitHeld(ev Event) {
-	s.emitMu.Lock()
-	sent := s.eventsClosed
-	if !sent {
-		select {
-		case s.events <- ev:
-			sent = true
-		default:
-		}
-	}
-	s.emitMu.Unlock()
-	if !sent {
-		s.emitAside(ev)
 	}
 }
 

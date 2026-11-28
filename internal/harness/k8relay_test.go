@@ -12,12 +12,11 @@ import (
 	"github.com/ericflo/eagent/internal/state"
 )
 
-// sr5CommandSeat types one of the agent's own commands as relay.Seat does
-// (relay's TestSR5SeatIsQuietWhileItTypesOneOfTheAgentsOwnCommands): since
-// ad52f91 its sending count keeps it not quiet for the whole of Send, and
-// the command's held delivered after (sendStart). Enter into a terminal
-// killed meanwhile fails, and the real seat returns a TypingError for a
-// command (Send: command || untrack).
+// sr5CommandSeat types one of the agent's own commands as relay.Seat does:
+// the send waits for the test (it is being typed), and the command is
+// reported delivered once typed. Enter into a terminal killed meanwhile
+// fails, and the real seat returns a TypingError for a command (Send:
+// command || untrack).
 type sr5CommandSeat struct {
 	*fakeSeat
 	entered chan string
@@ -40,16 +39,11 @@ func (s *sr5CommandSeat) Send(id, text, mode string) (_ string, err error) {
 	return "typed the command into pi", nil
 }
 
-// SR5-1. pi is idle; the user's /new goes to it (relay_send, a passthrough
-// line) and, while the seat is typing it, the user picks another effort in
-// the thread's settings (or /model). heldBack asks the seat, which is quiet
-// while a command is typed, so the change restarts pi at once: the restart
-// kills pi under the half-typed /new. The /new is reported unconfirmed (a
-// TypingError) and is never typed into the new pi, which opens the session
-// /new was to leave. The pass before ca22fca held exactly this ("is being
-// typed one of its own commands": typedCommand), and EVENTS.md still
-// promises the change waits while a send is "still being typed".
-func TestSR5AChangeWhileACommandIsTypedRestartsTheAgentUnderIt(t *testing.T) {
+// pi is idle; the user's /new goes to it (relay_send, a passthrough line)
+// and, while the seat is typing it, the user picks another effort in the
+// thread's settings (or /model). The record has the send on its way, so
+// the change waits: pi is not restarted under the half-typed /new.
+func TestAChangeAskedWhileACommandIsTypedWaitsForIt(t *testing.T) {
 	seat := &sr5CommandSeat{fakeSeat: newFakeSeat("…"), entered: make(chan string, 4), gate: make(chan struct{})}
 	next := newFakeSeat("two")
 	g := useGatedLaunches(t, []relaySeat{seat, next}, nil)
@@ -93,14 +87,11 @@ func TestSR5AChangeWhileACommandIsTypedRestartsTheAgentUnderIt(t *testing.T) {
 	}
 }
 
-// SR5-2. Just after pi has started (the launch is over, the agent not yet
-// at its prompt: the seat says starting), the user picks another effort.
-// Nothing was sent and pi runs none of its own commands, but the change is
-// told that pi "is not between turns yet (something sent to it is on its
-// way, or it is acting on one of its own commands)": the seat is not quiet
-// while starting, and repickRelay explains every hold that is not a dialog
-// or a recorded turn that way.
-func TestSR5AChangeRightAfterAStartIsToldSomethingWasSent(t *testing.T) {
+// Just after pi has started (the launch is over, the agent not yet at its
+// prompt: the record says starting), the user picks another effort.
+// Nothing was sent: the change waits, and says pi is still starting, not
+// that something sent to it is on its way.
+func TestAChangeRightAfterAStartSaysTheAgentIsStillStarting(t *testing.T) {
 	seat := newFakeSeat("…")
 	useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
 	rt := sr3PiRuntime(t)

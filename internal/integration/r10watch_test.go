@@ -168,8 +168,8 @@ func TestR10AnEarlierReplyBehindAKeptOneLosesNeither(t *testing.T) {
 // Finding 14: restoring a session after a restart of the serve, a file too
 // large to take is not left out untold, whether or not the service takes
 // posts: the restore posts nothing and passes the file refused, which the
-// resumed session records and its mirror posts until it goes out (harness
-// TestK1ARestoredTooLargeFileIsToldOnce). With words and without.
+// resumed session records and its mirror posts under a key of its own
+// (harness TestK1ARestoredTooLargeFileIsToldOnce). With words and without.
 func TestR10ARestoreLeavesATooLargeFileOutOnlyOnceTheSenderIsTold(t *testing.T) {
 	big := map[string]any{"id": "att-2", "kind": "file", "content_type": "video/quicktime", "filename": "clip.mov", "size": finalechat.MaxAttachmentSize + 1, "url": "/files/att-2"}
 	for _, body := range []string{"", "here it is"} {
