@@ -278,3 +278,48 @@ func TestK33ASendToAnAgentOutsideTheSwitchIsNotTheBriefs(t *testing.T) {
 		}
 	})
 }
+
+// A message still being typed when a restart begins, whose typing outlasts
+// the restart's wait and then ends with the terminal closed: nothing was
+// typed, and the record and the tool call said "the agent is not running"
+// of an agent that had been restarted and was up. They say what happened.
+func TestK33AMessageCutOffByARestartIsNotSaidToHaveNoAgent(t *testing.T) {
+	saved := oldSendSettle
+	oldSendSettle = 50 * time.Millisecond
+	t.Cleanup(func() { oldSendSettle = saved })
+	seat := &k33StuckSeat{k2FeedSeat: newK2FeedSeat(t), entered: make(chan string, 1), release: make(chan error, 1)}
+	next := newFakeSeat("two")
+	g := useGatedLaunches(t, []relaySeat{seat, next}, nil)
+	rt := newLaunchRuntime(t)
+	var seq int64
+	rt.sync(func() {
+		seq = rt.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "fix the flaky test please"})).Seq
+	})
+	fwd := make(chan string, 1)
+	go func() {
+		text, isErr := forward(rt, map[string]any{"seq": seq})
+		fwd <- fmt.Sprintf("%v %s", isErr, text)
+	}()
+	select {
+	case <-seat.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the message was never being typed")
+	}
+	id := lastSendID(rt)
+	restarted := relayToolAsync(rt, map[string]any{"action": "restart"})
+	seat.waitGone(t)
+	seat.end()
+	g.release <- struct{}{}
+	recv(t, restarted, "restart")
+	waitRelayStarts(t, rt)
+	seat.release <- relay.ErrClosed
+	out := recv(t, fwd, "relay_forward")
+	rt.sync(func() {})
+	got := deliveredFor(rt, id)
+	if len(got) != 1 || got[0].Outcome != event.DeliveryNotSent || !strings.Contains(got[0].Detail, "stopped or restarted before the message was typed") {
+		t.Fatalf("the record says of %s %+v; want it not sent, for the restart", id, got)
+	}
+	if !strings.HasPrefix(out, "true ") || strings.Contains(out, "not running") {
+		t.Fatalf("the model was told %q; want the failure with its true reason", out)
+	}
+}

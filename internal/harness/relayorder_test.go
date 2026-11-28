@@ -228,7 +228,8 @@ func TestRelayStopSettlesQueuedSends(t *testing.T) {
 				if ev.Type == event.RelayDelivered {
 					var d event.RelayDeliveredData
 					_ = ev.Decode(&d)
-					if !d.OK && strings.Contains(d.Detail, "not running") {
+					// A by its seat's word (its agent gone), B and C by the queue's.
+					if !d.OK && (strings.Contains(d.Detail, "not running") || strings.Contains(d.Detail, "stopped or restarted before the message was typed")) {
 						failed[d.ID] = true
 					}
 				}

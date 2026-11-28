@@ -824,7 +824,16 @@ func (g *phoneRig) exit(within time.Duration) int {
 		g.done <- code
 		return code
 	case <-time.After(within):
-		g.t.Fatalf("the session did not end; said %q; logs %v", g.ui.said(), g.ui.logged())
+		// What the session recorded last: a run that does not end is rare
+		// and has not been reproduced, so it says where it stood.
+		var tail []string
+		for _, ev := range g.log() {
+			tail = append(tail, fmt.Sprintf("%d %s %s", ev.Seq, ev.Type, clipRunes(string(ev.Data), 260)))
+		}
+		if len(tail) > 45 {
+			tail = tail[len(tail)-45:]
+		}
+		g.t.Fatalf("the session did not end; said %q; logs %v\nits last events:\n%s", g.ui.said(), g.ui.logged(), strings.Join(tail, "\n"))
 	}
 	return -1
 }

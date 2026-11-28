@@ -606,7 +606,7 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 		switch {
 		case h.barrier:
 		case !current:
-			res.err = fmt.Errorf("the agent is not running")
+			res.err = errSeatGone
 		default:
 			res.how, res.err = seat.Send(h.id, h.text, h.mode)
 		}
@@ -618,13 +618,20 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 		}
 		untyped := res.err != nil && sendErrOutcome(res.err) == event.DeliveryNotSent
 		if errors.Is(res.err, relay.ErrClosed) {
-			// Its terminal was closed under it and no agent took over: the
-			// relay was stopped.
-			res.err = fmt.Errorf("the agent is not running")
+			// Its terminal was closed under it and no start took the send
+			// (passOn): the relay was stopped, or a restart went on without
+			// this typing and its agent is up again.
+			res.err = errSeatGone
 		}
 		r.settleSend(q, h, res, untyped)
 	}
 }
+
+// errSeatGone is why a send was not typed into a seat that was taken out
+// of use under it: true of a relay that was stopped and of one that was
+// restarted meanwhile (whose agent runs again), so it does not say the
+// agent is down.
+var errSeatGone = errors.New("the agent was stopped or restarted before the message was typed, so it was not typed; send it again if it is still wanted")
 
 // passOn hands a send that could not be typed because a restart or a
 // switch took its seat out of use to that start, ahead of the sends the

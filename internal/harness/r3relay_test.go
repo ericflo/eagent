@@ -150,7 +150,7 @@ func TestSendCutOffByAStopIsRecordedUndelivered(t *testing.T) {
 	recv(t, relayToolAsync(rt, map[string]any{"action": "stop"}), "stop")
 	waitFor(t, "A recorded undelivered", func() bool {
 		d, failed := failedDeliveries(rt)[id]
-		return failed && strings.Contains(d.Detail, "not running")
+		return failed && strings.Contains(d.Detail, "stopped or restarted before the message was typed")
 	})
 }
 
