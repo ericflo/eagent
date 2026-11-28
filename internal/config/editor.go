@@ -202,20 +202,37 @@ func Resolve(project, preset, bundle string) Resolution {
 			changed[k] = true
 		}
 	}
+	cfg.Instructions = loadInstructions(project)
+	if res.LoadError == "" {
+		if err := cfg.Validate(); err != nil {
+			res.LoadError = err.Error()
+		}
+	}
+	res.Effective = cfg
+	// A route's window is the variable's that names another model for it,
+	// by the loader's own rule (EnvMoved): it follows that model whatever
+	// the layers say, the same number or not. A variable that names the
+	// model the route already has owns no window.
+	windows := map[string]string{}
+	for _, route := range []string{"/model", "/summarizer/model"} {
+		name, named := envVars[route+"/model"]
+		if model, _ := res.EnvMoved(route); named && model {
+			windows[route+"/context_tokens"] = name
+			changed[route+"/context_tokens"] = true
+		}
+	}
 	for k := range changed {
-		_, summarizerModel := envVars["/summarizer/model/model"]
 		if name, ok := envVars[k]; ok {
 			res.Sources[k] = "env:" + name
-		} else if k == "/summarizer/model/context_tokens" && res.Layered.Summarizer.Model != nil && !summarizerModel {
+		} else if name, ok := windows[k]; ok {
+			res.Sources[k] = "env:" + name
+		} else if k == "/summarizer/model/context_tokens" && res.Layered.Summarizer.Model != nil {
 			// The window of the server an address variable moves the
 			// layers' route to (applyEnv), as for the main route below.
 			res.Sources[k] = "env"
 		} else if name := summarizerEnv(); name != "" && strings.HasPrefix(k, "/summarizer/model/") {
 			// The rest of a summarizer route the environment created is
 			// copied from the main model because of that variable.
-			res.Sources[k] = "env:" + name
-		} else if name, ok := envVars["/model/model"]; ok && k == "/model/context_tokens" {
-			// The window follows the model the variable names.
 			res.Sources[k] = "env:" + name
 		} else {
 			// Among them the window of the server an address variable moves
@@ -225,13 +242,6 @@ func Resolve(project, preset, bundle string) Resolution {
 			res.Sources[k] = "env"
 		}
 	}
-	cfg.Instructions = loadInstructions(project)
-	if res.LoadError == "" {
-		if err := cfg.Validate(); err != nil {
-			res.LoadError = err.Error()
-		}
-	}
-	res.Effective = cfg
 	switch {
 	case bundle != "":
 		res.Active = Active{Kind: "bundle", Name: bundle}

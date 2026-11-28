@@ -1009,31 +1009,6 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 	return cfg, cfg.Validate()
 }
 
-// ClearNulls empties, in each route of the main and summarizer chains, a
-// context window, effort or reply ceiling that m gives as null: what the
-// editor writes for a field it leaves empty. It is for a whole
-// configuration decoded onto the defaults, where nothing lies below to
-// clear; a layer over a preset is overlay's (followModel).
-func ClearNulls(cfg *Config, m map[string]json.RawMessage) {
-	clear := func(a *ModelRoute, layer json.RawMessage) {
-		obj := object(layer)
-		for cur := a; cur != nil && obj != nil; cur = cur.Fallback {
-			if string(obj["context_tokens"]) == "null" {
-				cur.ContextTokens = 0
-			}
-			if string(obj["reasoning_effort"]) == "null" {
-				cur.ReasoningEffort = ""
-			}
-			if string(obj["max_tokens"]) == "null" {
-				cur.MaxTokens = 0
-			}
-			obj = object(obj["fallback"])
-		}
-	}
-	clear(&cfg.Model, m["model"])
-	clear(cfg.Summarizer.Model, object(m["summarizer"])["model"])
-}
-
 // ChosenPreset is a built-in preset as a running session gets it when the
 // user picks it from the list of configurations: the project file's
 // settings over the preset, as at a start with --preset, except which model

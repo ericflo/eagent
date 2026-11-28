@@ -569,8 +569,10 @@ func CurrentLayers(project, preset, bundle string) (config.Config, error) {
 	}
 	res := config.Resolve(project, preset, bundle)
 	// Whether a bundle is laid is the bundle Resolve applied (Active), never
-	// a "name" config.json may carry (`config --write` once wrote one).
-	if bundle == "" && res.LoadError == "" && res.Active.Kind != "bundle" {
+	// a "name" config.json may carry (`config --write` once wrote one). A
+	// file that is whole only with its default bundle does not check out
+	// without it, and is read with it all the same.
+	if bundle == "" && res.Active.Kind != "bundle" {
 		var file map[string]json.RawMessage
 		_ = json.Unmarshal([]byte(res.File.Raw), &file)
 		if b := config.DefaultBundle(file); b != "" {
@@ -643,7 +645,8 @@ func (s *Service) ValidateServerEdits(p control.Proposal, grant control.Grant) (
 }
 
 // pickRefused is the refusal of a preset pick whose preset would not run
-// as it is (routePicks). Nothing is written for a proposal it refuses.
+// as it is (routePicks), or of a summarizer route the proposal may not
+// write whole (prepare). Nothing is written for a proposal it refuses.
 type pickRefused struct{ why string }
 
 func (e *pickRefused) Error() string { return e.why }
@@ -762,8 +765,8 @@ func (s *Service) CheckWrite(raw string) error {
 // and may set a route with no value, which writes it as null (a fallback
 // turned off). Either file is checked as a person's save of it is, except
 // that for a reversal a route pairing an address and a key variable as a
-// route in force at the command did (inForce, RoutePairs) passes the
-// key-choice and pairing checks.
+// route in force at the command did (inForce, RoutePairs) is checked as
+// one saved here.
 func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, inForce [][2]string) (raw string, etag string, before RemoteView, err error) {
 	picks := !undo
 	before, err = s.RemoteSnapshot(grant)
@@ -792,19 +795,36 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 			}
 		}
 	}
+	// A reversal may put back the address and the key variable of a pair
+	// in force at the command: the command may have removed the one place
+	// either was written (a preset pick drops the file's own route).
 	d := before.Descriptor
+	var recorded []config.ModelRoute
 	if undo && len(inForce) > 0 {
+		for _, pair := range inForce {
+			recorded = append(recorded, config.ModelRoute{BaseURL: pair[0], APIKeyEnv: pair[1]})
+		}
 		d.Fields = slices.Clone(d.Fields)
 		for i, f := range d.Fields {
-			if strings.HasSuffix(f.Key, "/api_key_env") {
-				enum := slices.Clone(f.Shape.Enum)
+			enum := slices.Clone(f.Shape.Enum)
+			switch {
+			case strings.HasSuffix(f.Key, "/api_key_env"):
 				for _, pair := range inForce {
 					if pair[1] != "" && !slices.Contains(enum, any(pair[1])) {
 						enum = append(enum, pair[1])
 					}
 				}
-				d.Fields[i].Shape.Enum = enum
+			case strings.HasSuffix(f.Key, "/base_url") && f.Key != "/finalechat/base_url":
+				for _, e := range p.Edits {
+					v, _ := e.Value.(string)
+					if e.Key == f.Key && v != "" && !slices.Contains(enum, any(v)) && slices.ContainsFunc(inForce, func(pair [2]string) bool { return pair[0] == strings.TrimRight(v, "/") }) {
+						enum = append(enum, v)
+					}
+				}
+			default:
+				continue
 			}
+			d.Fields[i].Shape.Enum = enum
 		}
 	}
 	if err = checks.Validate(d, grant); err != nil {
@@ -842,8 +862,19 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 		seed := layers.Model
 		seed.Fallback = nil
 		var route map[string]any
-		raw, _ := json.Marshal(seed)
-		_ = json.Unmarshal(raw, &route)
+		b, _ := json.Marshal(seed)
+		_ = json.Unmarshal(b, &route)
+		// The whole route is written, so the proposal must be allowed
+		// every field of it: one it may not write (its grant does not
+		// cover where a model is reached, or its key variable) is not
+		// written for it, and its undo could not take it back.
+		for _, f := range before.Descriptor.Fields {
+			leaf, under := strings.CutPrefix(f.Key, "/summarizer/model/")
+			if _, seeded := route[leaf]; under && seeded && !f.Writable {
+				err = &pickRefused{fmt.Sprintf("the summarizer has no model of its own yet, and giving it one writes %s, which this change may not write (%s); nothing was changed", f.Key, f.LockedReason)}
+				return
+			}
+		}
 		setPointer(values, "/summarizer/model", route, false)
 	}
 	for _, e := range p.Edits {
@@ -885,26 +916,8 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 	if err != nil {
 		return
 	}
-	// The route checks see a recorded pair's route without its key variable:
-	// its address is still checked, and every other route as it is.
-	checked := cfg
-	if undo && len(inForce) > 0 {
-		var strip func(a *config.ModelRoute) *config.ModelRoute
-		strip = func(a *config.ModelRoute) *config.ModelRoute {
-			if a == nil {
-				return nil
-			}
-			c := *a
-			if slices.Contains(inForce, [2]string{strings.TrimRight(c.BaseURL, "/"), c.APIKeyEnv}) {
-				c.APIKeyEnv = ""
-			}
-			c.Fallback = strip(a.Fallback)
-			return &c
-		}
-		checked.Model = *strip(&cfg.Model)
-		checked.Summarizer.Model = strip(cfg.Summarizer.Model)
-	}
-	if err = s.CheckRemoteRoutes(checked, res.Effective); err != nil {
+	// The route checks take a recorded pair as one saved here.
+	if err = s.CheckRemoteRoutes(cfg, res.Effective, recorded...); err != nil {
 		return
 	}
 	for _, problem := range cfg.Problems() {
@@ -949,7 +962,17 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 	// choosing one sets the model to it, as /preset says. (A saved preset
 	// chosen or unset, /default_config, can bring another preset with it
 	// and is no pick: the file's own route is not that change's to remove.)
-	presetPick := after.Preset != prior.Preset && names("/preset") && !names("/model/model") && !names("/model/base_url")
+	// The pick is the preset the proposal leaves the file naming ("" for
+	// none), whatever a layer above the file then makes of it: where that
+	// layer names the preset, the check below refuses the pick.
+	asked := ""
+	if v, _ := pointerValue(values, "/preset"); v != nil {
+		asked, _ = v.(string)
+	}
+	if canon, ok := config.ResolvePreset(asked); ok {
+		asked = canon
+	}
+	presetPick := asked != prior.Preset && names("/preset") && !names("/model/model") && !names("/model/base_url")
 	if presetPick {
 		// The file's own choice of model and of where it is reached goes,
 		// by the rule `eagent presets use` and a session's pick have
@@ -983,7 +1006,7 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 		// preset whose model runs at another address or with another key.
 		if err == nil {
 			want := config.Defaults()
-			if canon, ok := config.ResolvePreset(after.Preset); ok {
+			if canon, ok := config.ResolvePreset(asked); ok {
 				config.Presets[canon](&want)
 			}
 			var parts []string
@@ -1009,8 +1032,8 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 				parts = append(parts, fmt.Sprintf("%s stays %s (%s)", f.leaf, f.now, why))
 			}
 			if len(parts) > 0 {
-				chosen := fmt.Sprintf("the preset %s (%s @ %s) would not run as it is", after.Preset, want.Model.Model, want.Model.BaseURL)
-				if after.Preset == "" {
+				chosen := fmt.Sprintf("the preset %s (%s @ %s) would not run as it is", asked, want.Model.Model, want.Model.BaseURL)
+				if asked == "" {
 					chosen = fmt.Sprintf("the defaults (%s @ %s) would not run as they are", want.Model.Model, want.Model.BaseURL)
 				}
 				return &pickRefused{fmt.Sprintf("eagent's %s, so %s; nothing was changed", strings.Join(parts, ", and its "), chosen)}

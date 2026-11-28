@@ -60,6 +60,21 @@ const cases = {
       if (!edit || edit.op !== 'set' || edit.value !== 200000) throw new Error('window not spelled: ' + JSON.stringify(proposals.at(-1)?.edits));
     },
   },
+  // A model field marked as EAGENT_MODEL's, naming the model the route
+  // has without it, pins no window: a pinned save spells the window. (The
+  // window of another model the variable names is locked.)
+  'model-var-own-model': {
+    presets: { glm },
+    effective: { '/preset': 'glm', '/model/model': 'glm', '/model/base_url': 'https://api.together.xyz/v1', '/model/context_tokens': 200000 },
+    saved: { '/preset': 'glm' },
+    fields: { '/model/model': { writable: false, source: 'env:EAGENT_MODEL' } },
+    body: { config: { model: { model: 'glm', base_url: 'https://api.together.xyz/v1', context_tokens: 200000 } }, base_preset: 'glm', mode: 'pin' },
+    check(result, proposals, error) {
+      if (error) throw error;
+      const edit = windowEdit(proposals);
+      if (!edit || edit.op !== 'set' || edit.value !== 200000) throw new Error('window not spelled: ' + JSON.stringify(proposals.at(-1)?.edits));
+    },
+  },
   // A window the user enters under it is written.
   'pinned-entered': {
     ...pinned,

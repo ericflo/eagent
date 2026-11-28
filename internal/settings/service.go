@@ -146,9 +146,10 @@ func (s *Service) savedRoutes() []config.ModelRoute {
 // CheckRoutes refuses hosts and key names that neither the catalog, registered
 // servers, nor the saved configuration knows: custom endpoints must be
 // registered explicitly (via servers.json, CLI, or local UI) or written to
-// config.json, never smuggled in via a config save or remote edit.
-func (s *Service) CheckRoutes(cfg config.Config) error {
-	saved := s.savedRoutes()
+// config.json, never smuggled in via a config save or remote edit. An
+// undo's recorded routes count as saved ones (prepare).
+func (s *Service) CheckRoutes(cfg config.Config, recorded ...config.ModelRoute) error {
+	saved := append(s.savedRoutes(), recorded...)
 	known := func(a config.ModelRoute) error {
 		trimmed := strings.TrimRight(a.BaseURL, "/")
 		if pr, ok := config.ProviderForURLFor(s.Project, a.BaseURL); ok && pr.Custom {
@@ -215,13 +216,13 @@ func (s *Service) CheckRoutes(cfg config.Config) error {
 // files. So a remote edit never sends one provider's key to another, in one
 // edit or several, nor by moving an address while the environment pins the
 // key variable.
-func (s *Service) CheckRemoteRoutes(cfg, before config.Config) error {
-	if err := s.CheckRoutes(cfg); err != nil {
+func (s *Service) CheckRemoteRoutes(cfg, before config.Config, recorded ...config.ModelRoute) error {
+	if err := s.CheckRoutes(cfg, recorded...); err != nil {
 		return err
 	}
 	type pair struct{ host, key string }
 	trusted := map[pair]bool{}
-	for _, a := range s.savedRoutes() {
+	for _, a := range append(s.savedRoutes(), recorded...) {
 		trusted[pair{strings.TrimRight(a.BaseURL, "/"), a.APIKeyEnv}] = true
 	}
 	for _, a := range configRoutes(before) {
@@ -391,7 +392,9 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	// force, except on a route an address variable moved: there a server's
 	// list may have changed since the form was read, so its window is
 	// taken as left as loaded, and one it carries that differs from the
-	// window in force is reported skipped as that variable's.
+	// window in force is reported skipped as that variable's. A save told
+	// to write over the environment (AllowShadow) writes the window it was
+	// given, as it writes the rest.
 	route := func(c *config.Config, ptr string) *config.ModelRoute {
 		if ptr == "/model" {
 			return &c.Model
@@ -403,7 +406,7 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	for _, ptr := range []string{"/model", "/summarizer/model"} {
 		_, model := env[ptr+"/model"]
 		_, addr := env[ptr+"/base_url"]
-		if _, owned := env[ptr+"/context_tokens"]; owned || !model && !addr {
+		if _, owned := env[ptr+"/context_tokens"]; b.AllowShadow || owned || !model && !addr {
 			continue
 		}
 		was := &resolved().Effective

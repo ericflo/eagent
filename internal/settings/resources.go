@@ -29,40 +29,37 @@ func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 	var cfg config.Config
 	if len(b.Config) > 0 && string(b.Config) != "null" {
 		cfg = config.Defaults()
-		// A bundle builds on the preset it names, as it loads (config.BundleFromBytes).
+		// The JSON is one of two things. With no preset named and its main
+		// route given whole (protocol, address and model), it is a whole
+		// configuration, the editor's form: that route stands in place of
+		// the defaults', so a field the form shows empty is saved empty.
+		// Anything else is a layer over the preset it names, or over the
+		// defaults, laid as the loader lays it (config.BundleFromBytes): a
+		// route it moves to another model or address takes the window
+		// there unless it names one (followModel).
 		var named struct {
-			Preset string `json:"preset"`
+			Preset string            `json:"preset"`
+			Model  config.ModelRoute `json:"model"`
 		}
-		layer := false
-		if json.Unmarshal(b.Config, &named) == nil {
-			if canon, ok := config.ResolvePreset(named.Preset); ok {
-				config.Presets[canon](&cfg)
-				layer = true
-			}
+		_ = json.Unmarshal(b.Config, &named)
+		canon, preset := config.ResolvePreset(named.Preset)
+		if preset {
+			config.Presets[canon](&cfg)
 		}
+		whole := !preset && named.Model.Protocol != "" && named.Model.BaseURL != "" && named.Model.Model != ""
 		dec := json.NewDecoder(strings.NewReader(string(b.Config)))
 		dec.DisallowUnknownFields()
-		into := &cfg
-		if layer {
-			into = new(config.Config) // checked here, laid below
+		into := new(config.Config) // a layer is checked here, laid below
+		if whole {
+			cfg.Model, into = config.ModelRoute{}, &cfg
 		}
 		if err := dec.Decode(into); err != nil {
 			return cfg, &Error{Status: 400, Message: "config: " + err.Error()}
 		}
 		var m map[string]json.RawMessage
-		if json.Unmarshal(b.Config, &m) == nil {
-			if layer {
-				// Over the preset it names, laid as the loader lays it: a
-				// route it moves to another model or address takes the
-				// window there unless it names one (followModel).
-				if err := config.Layer(s.Project, &cfg, m, "bundle "+b.Name); err != nil {
-					return cfg, &Error{Status: 400, Message: err.Error()}
-				}
-			} else {
-				// A whole configuration (the editor's) over the defaults:
-				// a field the editor left empty is written as null, which
-				// the decode above leaves at the default's value.
-				config.ClearNulls(&cfg, m)
+		if !whole && json.Unmarshal(b.Config, &m) == nil {
+			if err := config.Layer(s.Project, &cfg, m, "bundle "+b.Name); err != nil {
+				return cfg, &Error{Status: 400, Message: err.Error()}
 			}
 		}
 		cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", ""

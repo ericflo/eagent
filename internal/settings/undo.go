@@ -121,8 +121,9 @@ func ConfigInverse(original control.Proposal, beforeRaw, desiredRaw string) (con
 // is; the file it writes is checked as a
 // person's save of it would be, except that a route pairing an address and
 // a key variable as a route in force at the command did (inForce, the
-// journal's in_force) passes the key-choice and pairing checks. beforeRaw
-// and desiredRaw are the journal's before_raw and desired.
+// journal's in_force) is checked as one saved here: the command may have
+// removed the one place its address was written. beforeRaw and desiredRaw
+// are the journal's before_raw and desired.
 func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw string, grant control.Grant, inForce ...[2]string) (string, string, RemoteView, error) {
 	desired, err := fileValues(desiredRaw)
 	if err != nil {
