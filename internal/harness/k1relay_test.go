@@ -217,10 +217,7 @@ func TestK1ABriefAfterARestartHandsOverFromTheAgentThatDidTheWork(t *testing.T) 
 			fresh := &Runtime{st: state.Replay(slices.Clone(rt.st.Events))}
 			restarted = fresh.writeBrief(fresh.handoverFor(fresh.st.Relays["claude"]), nil)
 		})
-		in := "was told the work in between"
-		if !typed {
-			in = "was started to take over in between"
-		}
+		const in = "was started to take over in between"
 		if !strings.HasPrefix(live, "You are taking over this work from Codex") || !strings.Contains(live, in) || !strings.Contains(live, "parsed the config files") {
 			t.Fatalf("typed %v: the brief before a restart:\n%s", typed, live)
 		}

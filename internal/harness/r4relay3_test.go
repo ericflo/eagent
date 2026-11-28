@@ -70,7 +70,7 @@ func r43Brief(dir, between string, said ...string) string {
 	return b + "\nCodex's last report:\none\n\nCheck the working tree and recent commits, then continue where it left off."
 }
 
-const r43ClaudeTold = "Claude (its session log is " + r43ClaudeLog + ") was told the work in between and stopped before it finished a turn; it may have changed files."
+const r43ClaudeTold = "Claude (its session log is " + r43ClaudeLog + ") was started to take over in between and stopped before it finished a turn; it may have changed files."
 
 func r43Typed(t *testing.T, seat *fakeSeat, want ...string) {
 	t.Helper()
@@ -149,7 +149,7 @@ func TestChainWithAnUnbriefedAndABriefedAgentNamesEachTruly(t *testing.T) {
 	waitFor(t, "pi's brief typed", func() bool { return len(pi.sentTexts()) == 1 })
 	r43Inner(t, rt, "pi", r43PiLog)
 	r43Step(t, rt, g, map[string]any{"action": "switch", "profile": "antigravity", "relay": "pi"})
-	between := "Claude was started to take over in between and stopped before it was told the work. Pi (its session log is " + r43PiLog + ") was told the work in between and stopped before it finished a turn; it may have changed files."
+	between := "Claude, then Pi (its session log is " + r43PiLog + ") was started to take over in between and stopped before it finished a turn; it may have changed files."
 	r43Typed(t, ag, r43Brief(dir, between, r4Task))
 }
 

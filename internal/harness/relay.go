@@ -434,22 +434,15 @@ type handover struct {
 	who, dir, transcript string
 	// reportBy and report are the latest turn report in the chain.
 	reportBy, report string
-	// via are the agents started in between, oldest first: ones replaced
-	// before their brief was typed, and ones told the work and replaced
-	// before they finished a turn.
-	via []viaAgent
+	// via are the agents started in between, oldest first, each replaced
+	// before it finished a turn: "Claude", or "Claude (its session log is
+	// …)".
+	via []string
 	// names are the relays whose user sends the brief quotes, each with
 	// the sequence at which that agent first started under its name. An
 	// agent started later under the same name is another conversation:
 	// what the user tells it is not part of this work.
 	names []handoverName
-}
-
-// viaAgent is an agent in between: "Claude", or "Claude (its session log
-// is …)"; told says its brief was typed.
-type viaAgent struct {
-	text string
-	told bool
 }
 
 type handoverName struct {
@@ -479,7 +472,7 @@ func (h *handover) through(rel *state.Relay, told bool) *handover {
 	if rel.Transcript != "" {
 		via += " (its session log is " + rel.Transcript + ")"
 	}
-	n.via = append(append([]viaAgent(nil), h.via...), viaAgent{via, told})
+	n.via = append(append([]string(nil), h.via...), via)
 	n.names = append(append([]handoverName(nil), h.names...), handoverName{rel.Name, rel.StartSeq})
 	if rel.LastTurn != "" && !told {
 		n.reportBy, n.report = rel.Who(), rel.LastTurn
@@ -628,10 +621,10 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 }
 
 // errSeatGone is why a send was not typed into a seat that was taken out
-// of use under it: true of a relay that was stopped and of one that was
-// restarted meanwhile (whose agent runs again), so it does not say the
-// agent is down.
-var errSeatGone = errors.New("the agent was stopped or restarted before the message was typed, so it was not typed; send it again if it is still wanted")
+// of use under it: true of an agent that exited, of one that was stopped,
+// and of one restarted meanwhile (which runs again), so it does not say
+// which, nor that the agent is down.
+var errSeatGone = errors.New("the agent exited or was stopped or restarted before the message was typed, so it was not typed; send it again if it is still wanted")
 
 // passOn hands a send that could not be typed because a restart or a
 // switch took its seat out of use to that start, ahead of the sends the
@@ -2780,20 +2773,10 @@ func (r *Runtime) briefOf(ho *handover, pending map[string]bool) (string, map[st
 	if ho.transcript != "" {
 		fmt.Fprintf(&b, " Its full session log is %s (JSONL) if you need detail.", ho.transcript)
 	}
-	// The agents in between, in order; neighbours of one kind in one
-	// sentence.
-	for i := 0; i < len(ho.via); {
-		j := i
-		var names []string
-		for ; j < len(ho.via) && ho.via[j].told == ho.via[i].told; j++ {
-			names = append(names, ho.via[j].text)
-		}
-		if ho.via[i].told {
-			fmt.Fprintf(&b, " %s was told the work in between and stopped before it finished a turn; it may have changed files.", strings.Join(names, ", then "))
-		} else {
-			fmt.Fprintf(&b, " %s was started to take over in between and stopped before it was told the work.", strings.Join(names, ", then "))
-		}
-		i = j
+	// The agents in between, in order. Whether each was told the work
+	// before it was stopped is not said: its session log shows it.
+	if len(ho.via) > 0 {
+		fmt.Fprintf(&b, " %s was started to take over in between and stopped before it finished a turn; it may have changed files.", strings.Join(ho.via, ", then "))
 	}
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
 	// waits: the record has no word of how a send of it went. The brief is
