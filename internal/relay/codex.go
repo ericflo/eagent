@@ -38,9 +38,14 @@ func (codexAgent) ready(screen string) bool {
 	return strings.Contains(f, "Ask Codex to do anything") || strings.Contains(f, "% context left")
 }
 
-// busy: Codex's working line, drawn just above its composer, says how to
-// stop it.
-func (codexAgent) busy(screen string) bool { return codexSpinner.MatchString(screen) }
+// busy: Codex's working line, drawn above its composer, says how to stop
+// it. It is read from the foot of the screen, or from further up while the
+// composer shows under it (a composer of several lines, or whatever Codex
+// draws between the two, moves it up): the same words in its output above
+// a dialog are not it.
+func (c codexAgent) busy(screen string) bool {
+	return codexSpinner.MatchString(foot(screen)) || c.ready(screen) && codexSpinner.MatchString(screen)
+}
 
 func (codexAgent) dialogs() []dialog {
 	return []dialog{

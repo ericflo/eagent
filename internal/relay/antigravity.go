@@ -33,35 +33,43 @@ func (antigravityAgent) newParser(Spec) parser { return antigravityParser{} }
 // interruptKeys: agy stops a turn on Ctrl+C.
 func (antigravityAgent) interruptKeys() []string { return []string{"C-c"} }
 
-// ready matches the status line the relay-agy-status hook prints, at the
-// foot of the screen. agy draws that line under its own dialogs too (its
-// folder-trust prompt): one that closes on the line above it, with the
-// hint its dialogs end on, is a dialog and no prompt.
-func (antigravityAgent) ready(screen string) bool {
+// status reads the line the relay-agy-status hook prints, at the foot of
+// the screen: the state it names, and whether the line is there as agy
+// draws it at its prompt and while it works. agy draws the line under its
+// own dialogs too (its folder-trust prompt): one right under the hint its
+// dialogs end on is a dialog's, and says neither that agy is at its prompt
+// nor that it works.
+func (antigravityAgent) status(screen string) (state string, ok bool) {
 	lines := strings.Split(foot(screen), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.Contains(lines[i], "Antigravity relay ·") {
-			return i == 0 || !strings.Contains(lines[i-1], "enter Confirm")
+		_, rest, found := strings.Cut(lines[i], "Antigravity relay ·")
+		if !found {
+			continue
 		}
+		if i > 0 && strings.Contains(lines[i-1], "enter Confirm") {
+			return "", false
+		}
+		state, _, _ = strings.Cut(rest, " ·")
+		return strings.TrimSpace(state), true
 	}
-	return false
+	return "", false
 }
 
-// busy: the relay line is drawn whatever agy does, and names its state.
+// ready: agy's status line stands at the foot of its screen (status).
+func (a antigravityAgent) ready(screen string) bool {
+	_, ok := a.status(screen)
+	return ok
+}
+
+// busy: the status line is drawn whatever agy does, and names its state.
 // Only "idle" is known for certain (agy's own run statuses are idle,
 // running, busy and canceling, but how it names them here is not
 // documented), so any other name reads as busy. The seat asks only when an
 // agent that went quiet would otherwise be called idle, and such an agent
 // still takes messages and goes back to work on its next transcript line.
-func (antigravityAgent) busy(screen string) bool {
-	// The line is drawn at the bottom; the same words in output above it
-	// are not it.
-	_, rest, ok := strings.Cut(lastLines(screen, 3), "Antigravity relay · ")
-	if !ok {
-		return false
-	}
-	state, _, _ := strings.Cut(rest, " ·")
-	return !strings.EqualFold(strings.TrimSpace(state), "idle")
+func (a antigravityAgent) busy(screen string) bool {
+	state, ok := a.status(screen)
+	return ok && state != "" && !strings.EqualFold(state, "idle")
 }
 
 func (antigravityAgent) dialogs() []dialog {

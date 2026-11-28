@@ -36,9 +36,32 @@ func (claudeAgent) ready(screen string) bool {
 	return strings.Contains(f, "bypass permissions on") || strings.Contains(f, "for shortcuts")
 }
 
-// busy: Claude's footer stays while it works; its spinner line, drawn just
-// above the input box, says how to stop it.
-func (claudeAgent) busy(screen string) bool { return claudeSpinner.MatchString(screen) }
+// busy: Claude's footer stays while it works, and Claude says how to stop
+// it: among the hints under its input box as Claude Code 2.1.332 draws it
+// (at the end of its mode line, "⏵⏵ bypass permissions on (shift+tab to
+// cycle) · esc to interrupt"), and in earlier versions on the spinner line
+// above the box. The hint is read by its shape (one of the footer's parts,
+// which " · " separates) from the foot of the screen, below the box's
+// lower rule where that shows there; the spinner line from the foot, or
+// from further up while the prompt shows under it (its todo list is drawn
+// between the two). The same words in its output above a dialog, or in a
+// sentence of its last answer, are not it.
+func (c claudeAgent) busy(screen string) bool {
+	f := foot(screen)
+	lines := strings.Split(f, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line != "" && strings.Trim(line, "─") == "" {
+			break // the box's lower rule: the box and the output are above it
+		}
+		for part := range strings.SplitSeq(line, " · ") {
+			if strings.TrimSpace(part) == "esc to interrupt" {
+				return true
+			}
+		}
+	}
+	return claudeSpinner.MatchString(f) || c.ready(screen) && claudeSpinner.MatchString(screen)
+}
 
 func (claudeAgent) dialogs() []dialog {
 	return []dialog{
