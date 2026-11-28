@@ -203,8 +203,11 @@ func TestK2AnArrivalTheReplacedSeatStillHadIsKept(t *testing.T) {
 	seat.end()
 	close(unblock)
 	waitRelayStarts(t, rt)
-	if got := deliveredFor(rt, id); len(got) != 1 || !got[0].OK || k2Outcome(rt, id) != state.SendArrived {
-		t.Fatalf("%s: %+v; want its one outcome, arrived", id, got)
+	// The restart may settle the send as unconfirmed first: the arrival the
+	// old seat read is then its newer word.
+	k2Until(5*time.Second, func() bool { return k2Outcome(rt, id) == state.SendArrived })
+	if got := deliveredFor(rt, id); k2Outcome(rt, id) != state.SendArrived {
+		t.Fatalf("%s: %+v; want it to end arrived", id, got)
 	}
 }
 

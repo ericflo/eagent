@@ -118,39 +118,6 @@ func TestSR3AChangeWaitingOnATypedNewRestartsPiIntoTheSessionItLeft(t *testing.T
 	}
 }
 
-// A restart that does not wait for the seat to be quiet (relay_control
-// restart) while pi runs /new: the replaced seat says the move only in its
-// last look, after the restart has stopped pi. The restart takes the
-// session id once that seat has drained, so the move counts.
-func TestK7AMoveTheReplacedSeatSaysLateIsTheSessionTheRestartOpens(t *testing.T) {
-	seat := newK2FeedSeat(t)
-	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
-	rt := sr3PiRuntime(t)
-	rt.sync(func() {
-		if err := rt.restartRelayWith(rt.st.Relays["pi"], relayPick{"", "high"}); err != nil {
-			t.Errorf("restart: %v", err)
-		}
-	})
-	seat.waitGone(t)
-	seat.say(relay.Event{Kind: relay.KindInner, InnerID: "sess-new"}) // its last look
-	seat.end()
-	g.waitEntered(t)
-	g.release <- struct{}{}
-	waitRelayStarts(t, rt)
-	var inner string
-	rt.sync(func() {
-		for _, ev := range rt.st.Events {
-			var d event.RelayStartData
-			if ev.Type == event.RelayStart && ev.Decode(&d) == nil {
-				inner = d.InnerID
-			}
-		}
-	})
-	if inner != "sess-new" {
-		t.Errorf("pi was started again with --session-id %q; it had moved to sess-new before it was stopped", inner)
-	}
-}
-
 // sr3HandSeat is Claude's seat handing a held message over: the send waits
 // for the test, then leaves the message in the spool (as spoolMessage
 // does, unclaimed: Claude is in its turn and no Stop hook has run) and

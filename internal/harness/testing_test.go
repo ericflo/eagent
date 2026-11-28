@@ -298,7 +298,6 @@ func TestMain(m *testing.M) {
 	finalReportTimeout, finalReportGrace = 3*time.Second, 4*time.Second
 	// Five seconds for a closed seat's watcher to say its last are real
 	// waits with a test's seat that never closes its events.
-	lastWordGrace = 20 * time.Millisecond
 	// Sessions record to temporary directories (t.TempDir) and fsync every
 	// event; on a memory filesystem that costs nothing. All of it is
 	// removed when the run ends.

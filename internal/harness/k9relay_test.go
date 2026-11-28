@@ -6,12 +6,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
-	"github.com/ericflo/eagent/internal/store"
 )
 
 // SR6-1. Codex is in a long turn (a build, a test suite, a subagent: its
@@ -65,83 +62,6 @@ func (s *k9HalfSeat) Send(id, text, mode string) (_ string, err error) {
 	s.entered <- id
 	<-s.gate
 	return "", &relay.TypingError{Err: errors.New("can't find pane: k9")}
-}
-
-// The sixth review's suspicion: Stop session while a message is being
-// typed into Codex. The stop's settle leaves the send being typed to
-// settleSend (settleExited), but its step can run first, and the session
-// ends before settleSend's step: the send, typed in part into an agent
-// now gone, had no outcome before session.end. The stop settles after the
-// stopped seat's send queue is done, as it waits for the seat's news.
-func TestK9StopSessionSettlesASendBeingTypedBeforeTheEnd(t *testing.T) {
-	seat := &k9HalfSeat{fakeSeat: newFakeSeat("one"), entered: make(chan string, 1), gate: make(chan struct{})}
-	rt, _, done := r10Session(t, seat)
-	sent := make(chan string, 1)
-	go func() {
-		out, _ := rt.relayTool("relay_send", argStr(map[string]any{"text": "run the tests"}), argNum(nil), argList(nil), false)
-		sent <- out
-	}()
-	id := <-seat.entered
-	rt.sync(func() { rt.stopSession("the user stopped the session") })
-	waitFor(t, "the stopped seat drained", func() bool {
-		rt.relays.mu.Lock()
-		defer rt.relays.mu.Unlock()
-		_, held := rt.relays.drained[seat]
-		return !held
-	})
-	close(seat.gate) // its terminal is gone: the typing fails part way
-	select {
-	case <-done:
-	case <-time.After(20 * time.Second):
-		t.Fatal("the session did not end")
-	}
-	evs, err := store.Read(rt.sess.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var outcomes []string
-	ended := false
-	for _, ev := range evs {
-		var d event.RelayDeliveredData
-		switch {
-		case ev.Type == event.SessionEnd:
-			ended = true
-		case ev.Type == event.RelayDelivered && ev.Decode(&d) == nil && d.ID == id:
-			o := d.Outcome
-			if ended {
-				o += " (after session.end)"
-			}
-			outcomes = append(outcomes, o)
-			t.Logf("%s: %s %q", id, d.Outcome, d.Detail)
-		}
-	}
-	if len(outcomes) != 1 || outcomes[0] != event.DeliveryUnconfirmed {
-		t.Errorf("%s, typed in part as Stop session killed Codex: %v; want one outcome, unconfirmed, before session.end", id, outcomes)
-	}
-}
-
-// The sixth review's suspicion: pi ran /new just before a switch to Claude
-// stopped it, and its seat says the move in its last look. The switch took
-// that seat out of use, and the move was dropped as a replaced seat's news:
-// a later restart of pi (relay_control restart of the stopped relay) would
-// resume the session /new had left. The record keeps the move.
-func TestK9AMoveSaidAtASwitchsCloseIsRecorded(t *testing.T) {
-	seat := newK2FeedSeat(t)
-	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("claude")}, nil)
-	rt := sr3PiRuntime(t)
-	switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
-	seat.waitGone(t)
-	seat.say(relay.Event{Kind: relay.KindInner, InnerID: "sess-new"}) // its last look
-	seat.end()
-	g.waitEntered(t)
-	g.release <- struct{}{}
-	recv(t, switched, "switch")
-	waitRelayStarts(t, rt)
-	rt.sync(func() {
-		if rel := rt.st.Relays["pi"]; rel == nil || rel.InnerID != "sess-new" {
-			t.Errorf("pi on the record after the switch: %+v; want the session its /new opened, sess-new", rel)
-		}
-	})
 }
 
 // The sixth review's suspicion: Stop session while a model change restarts

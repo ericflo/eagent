@@ -46,28 +46,6 @@ func k29NotConfirmed(t *testing.T, rt *Runtime, done <-chan int, id string, read
 
 const k29GaveUp = "was taken into the agent's queue, which gave it up unread, and no prompt had shown it when the agent's seat was closed"
 
-// The agent's queue gave a message back unread, and its seat says so as
-// its last word, after the loop's queue has ended. The record had the
-// message arrived; the session's end writes the seat's newer word.
-func TestK29ASeatsLastWordOnAnArrivedSendIsRecordedAtTheEnd(t *testing.T) {
-	rt, seat, done, id := k29Arrived(t)
-	rt.relayOps.Add(1) // a start or stop of another agent still under way
-	var read int64
-	var lastNews time.Time
-	rt.sync(func() {
-		read, lastNews = rt.st.Relays["codex"].Read, rt.st.Relays["codex"].LastEventAt
-		rt.beginShutdown("quit", 0)
-	})
-	waitFor(t, "the loop's queue ended", func() bool {
-		rt.queueMu.RLock()
-		defer rt.queueMu.RUnlock()
-		return rt.queueEnded
-	})
-	seat.say(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: false, Outcome: relay.OutcomeUnconfirmed, Detail: k29GaveUp})
-	rt.relayOps.Done()
-	k29NotConfirmed(t, rt, done, id, read, lastNews)
-}
-
 // The same word said while the session is ending and its loop still takes
 // what seats say.
 func TestK29ASeatsNewerWordOnAnArrivedSendIsRecordedDuringTheEnd(t *testing.T) {

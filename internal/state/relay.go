@@ -395,7 +395,7 @@ func (s *State) keepHeld(r, prev *Relay) {
 		}
 		if text, ok := prev.Undelivered[d.ID]; ok {
 			// The new agent's from here on: the stopped one no longer
-			// waits for it (Holders).
+			// waits for it.
 			r.Undelivered[d.ID] = text
 			delete(prev.Undelivered, d.ID)
 			if ev.Seq < r.StartSeq {
@@ -439,21 +439,6 @@ func (s *State) RelayAt(name string, seq int64) *Relay {
 		return h[0]
 	}
 	return s.Relays[name]
-}
-
-// Holders are the relays that held a name in turn, oldest first: the one
-// that holds it now (Relays) last, and before it each one a new agent was
-// started in place of after it was stopped. Each still waits (Undelivered)
-// for what it was sent itself and has no outcome; what was held for the
-// start after it is that start's.
-func (s *State) Holders(name string) []*Relay {
-	if h := s.relayHolders[name]; len(h) > 0 {
-		return h
-	}
-	if r := s.Relays[name]; r != nil {
-		return []*Relay{r}
-	}
-	return nil
 }
 
 func (s *State) relayWho(name string, seq int64) string {

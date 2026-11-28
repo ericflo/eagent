@@ -1026,8 +1026,8 @@ func (r *Runtime) SessionID() string { return r.sess.ID }
 // ---- loop plumbing --------------------------------------------------------
 
 // enqueue hands fn to the loop's one queue, which the loop reads while it
-// runs and finish reads from its first step to the end of its retiring
-// drain: every fn it takes is run. False once finish has stopped reading
+// runs and finish reads from its first step until it ends the queue:
+// every fn it takes is run. False once finish has stopped reading
 // it (endQueue): fn is not run, and the caller is told.
 func (r *Runtime) enqueue(fn func()) bool {
 	r.queueMu.RLock()
@@ -1442,51 +1442,6 @@ func (r *Runtime) turnHeldBy() string {
 	return "a model call did not stop in time"
 }
 
-// awaitRetired runs what the loop's queue takes until no seat taken out of
-// use is waited for any more (retiringPendingLocked), settling each as it
-// falls due, or until limit fires. What the queue held at that moment was
-// said before the bound: it is run first, so the settle that follows (as
-// they stand, settleRestRetired) finds a word a seat had already said.
-// Finish's goroutine.
-func (r *Runtime) awaitRetired(limit <-chan time.Time) {
-	for {
-		r.relays.mu.Lock()
-		pending := r.retiringPendingLocked()
-		r.relays.mu.Unlock()
-		if !pending {
-			return
-		}
-		select {
-		case fn := <-r.loop:
-			fn()
-		case <-limit:
-			for n := len(r.loop); n > 0; n-- {
-				fn := <-r.loop // finish alone reads the queue now
-				fn()
-			}
-			r.ui.Log("a stopped agent had not said all it saw after %s; what it said after that is not recorded", oldSendSettle)
-			return
-		}
-		r.settleDueRetired()
-	}
-}
-
-// settleRestRetired settles every seat taken out of use that has a settle
-// and is not settled yet, as it stands (finish, past its bound).
-func (r *Runtime) settleRestRetired() {
-	r.relays.mu.Lock()
-	var rest []relaySeat
-	for seat, e := range r.relays.retiring {
-		if !e.settled && e.settle != nil {
-			rest = append(rest, seat)
-		}
-	}
-	r.relays.mu.Unlock()
-	for _, seat := range rest {
-		r.settleRetired(seat)
-	}
-}
-
 // finish runs after the loop exits: waits for the turn in flight, records
 // session.end, closes the store.
 func (r *Runtime) finish() {
@@ -1532,17 +1487,6 @@ queued:
 	// else waits for the next run (pollInbox), as does a file written
 	// after this.
 	r.pollInbox()
-	// Every seat taken out of use (a stop, a restart, a switch, Stop
-	// session) has drained and its sends are settled before the end: what
-	// it says, and how a send typed into it ended, come through the queue
-	// read here, and each is settled once it has drained and no send is
-	// being typed into it, within one bound for all; past it, the rest are
-	// settled as they stand. A start under way settles its own (below).
-	r.settleDueRetired()
-	limit := time.NewTimer(oldSendSettle)
-	r.awaitRetired(limit.C)
-	limit.Stop()
-	r.settleRestRetired()
 	// The queue's end: what it took is run; from here a post is refused
 	// (its caller is told), and a start that ends later is recorded below
 	// (abandonLaunch).
@@ -1571,10 +1515,6 @@ queued:
 		r.relayOps.Add(1) // finishLaunch's, given back by abandonLaunch
 		_, _ = r.finishLaunch(job)
 	}
-	// A start recorded just now may have left the settle of the record it
-	// replaced with a seat still draining (settleOld): past the bound
-	// above, it is settled as it stands, as the rest were.
-	r.settleRestRetired()
 	// The agents are not the session's children: they run in terminals of
 	// their own and outlive this process, so a resumed session (or the
 	// user, attached) picks up where they are. Only stop watching them.
@@ -1595,8 +1535,6 @@ queued:
 		<-idle
 	}
 	// Direct writes: the loop is no longer running.
-	// What a seat said of its own sends after the queue had ended.
-	r.recordLateNews()
 	// A send held for a start the session's end gave up (abandonLaunch),
 	// or still in a seat's queue (nothing is taken from one now), was never
 	// typed and never will be: it did not go. In the order they were sent.

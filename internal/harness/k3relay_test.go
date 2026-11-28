@@ -147,10 +147,15 @@ func TestK3AnArrivalTheStoppedSeatHadIsKept(t *testing.T) {
 		seat.end()
 		recv(t, stopped, "stop")
 		waitFor(t, "an outcome", func() bool { return len(deliveredFor(rt, id)) > 0 })
+		if arrives {
+			// The stop settles the send as unconfirmed at once; the arrival
+			// its seat read is the newer word.
+			waitFor(t, "the arrival", func() bool { return k2Outcome(rt, id) == state.SendArrived })
+		}
 		got := deliveredFor(rt, id)
 		switch {
-		case arrives && (len(got) != 1 || !got[0].OK || k2Outcome(rt, id) != state.SendArrived):
-			t.Fatalf("%s: %+v; want its one outcome, arrived", id, got)
+		case arrives && k2Outcome(rt, id) != state.SendArrived:
+			t.Fatalf("%s: %+v; want it to end arrived", id, got)
 		case !arrives && (len(got) != 1 || got[0].Outcome != event.DeliveryUnconfirmed):
 			t.Fatalf("%s: %+v; want its one outcome, unconfirmed", id, got)
 		}

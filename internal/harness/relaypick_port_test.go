@@ -256,6 +256,7 @@ func TestRelayChangeFromLiveSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt.st.Relays["claude"].State = "working"
+	seat.setState("working")
 	q := runtimecontrol.Request{ID: "c1", Expires: time.Now().Add(time.Minute), Grant: grant, Proposal: proposal}
 	if err := rt.applyRuntimeSettings(q, values, map[string]any{}); err != nil {
 		t.Fatal(err)
@@ -266,7 +267,11 @@ func TestRelayChangeFromLiveSettings(t *testing.T) {
 		t.Fatalf("published %+v, launched %d", got, len(launchedSpecs(launched)))
 	}
 	relayServeLoop(t, rt)
-	rt.sync(func() { rt.onRelayEvent("claude", relay.Event{Kind: relay.KindState, State: "idle"}) })
+	seat.setState("idle")
+	rt.sync(func() {
+		rt.onRelayEvent("claude", relay.Event{Kind: relay.KindState, State: "idle"})
+		rt.onRelayEvent("claude", relay.Event{Kind: relay.KindQuiet})
+	})
 	waitRelayStarts(t, rt)
 	rt.sync(func() { rt.pollRuntimeSettings() })
 	if got := c.Values.Relays["claude"]; got.Waiting || len(launchedSpecs(launched)) != 2 || launchedSpecs(launched)[1].Profile.Model != "sonnet" {

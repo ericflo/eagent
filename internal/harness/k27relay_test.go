@@ -53,39 +53,6 @@ func k27ReadMarkStays(t *testing.T, rt *Runtime, done <-chan int, id string, ok 
 	}
 }
 
-// The user quits while Codex works and a message is held for the end of
-// its turn; a start or stop of another agent is still under way, so the
-// loop's queue ends before the seats are closed. Codex's turn ends (its
-// report, read up to byte 100 of the transcript, is dropped: the session is
-// ending), and later its seat takes the held message back and says so, with
-// the read mark it has then (200, past the turn's line). The not_sent is
-// written by finish without that mark and at the relay's last news, so a
-// resume reads the turn again, as on main, where nothing was recorded
-// during the end. (It was written with the mark: a resume read on from 200
-// and the agent's report was never seen.)
-func TestK27ALateNotSentLeavesTheReadMarkBeforeADroppedTurn(t *testing.T) {
-	seat := newK2FeedSeat(t)
-	rt, _, done := r10Session(t, seat)
-	_, id := k2Forward(t, rt, seat, "and update the docs", "after_turn")
-
-	rt.relayOps.Add(1) // a start or stop of another agent still under way
-	var lastNews time.Time
-	rt.sync(func() {
-		lastNews = rt.st.Relays["codex"].LastEventAt
-		rt.beginShutdown("quit", 0)
-	})
-	waitFor(t, "the loop's queue ended", func() bool {
-		rt.queueMu.RLock()
-		defer rt.queueMu.RUnlock()
-		return rt.queueEnded
-	})
-	seat.say(relay.Event{Kind: relay.KindTurn, Text: "All tests pass; I fixed the flaky one in parse_test.go.", Read: 100})
-	seat.say(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: false, Outcome: relay.OutcomeNotSent, Read: 200,
-		Detail: "Codex's turn ended before it took this message, so it was not delivered; send it again if it is still wanted"})
-	rt.relayOps.Done()
-	k27ReadMarkStays(t, rt, done, id, false, lastNews)
-}
-
 // The same through the ending path that runs while finish still reads the
 // queue (onRelayEvent, r.ending): the user quits while a turn of eagent's is
 // in flight; Codex's turn ends (dropped) and the Stop hook hands it the held
