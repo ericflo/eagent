@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,17 +87,6 @@ type phone struct {
 	// the first, so what the user sent while the session was coming back
 	// is read too; from the second if the server does not know the first.
 	resumedBy, fallback string
-
-	// owed are the notes the sender is owed (phone.refused), and paid those
-	// posted whose record is not yet written, guarded by mu; owe wakes
-	// tellRefused for a new one. tellRefused runs from the thread's attach
-	// (telling) until payOwed stops it (paying, stopTelling), then closes
-	// told.
-	owed, paid      []phoneRefusedData
-	owe             chan struct{}
-	telling, paying bool
-	stopTelling     context.CancelFunc
-	told            chan struct{}
 }
 
 // startPhone wires the mirror up if a token is available and it is not
@@ -123,7 +111,6 @@ func (r *Runtime) startPhone() {
 	// them (each carries a client key, so a resend cannot duplicate).
 	client.Patient = true
 	ctx, cancel := context.WithCancel(context.Background())
-	tellCtx, stopTelling := context.WithCancel(ctx)
 	p := &phone{
 		client: client, ref: finalechat.Ref("eagent:" + r.sess.ID), logf: r.ui.Log,
 		title: filepath.Base(r.opts.Project), agent: fc.AgentName(),
@@ -131,9 +118,6 @@ func (r *Runtime) startPhone() {
 		sid: r.sess.ID, resumes: r.st.Resumes, features: map[string]bool{}, wake: make(chan struct{}, 1),
 		ctx: ctx, cancel: cancel, queue: make(chan func(context.Context), 256),
 		posted: map[string]bool{}, questions: map[string]string{}, fromPhone: map[string]string{}, open: map[string]string{}, gone: map[string]bool{}, taken: map[string]bool{},
-		// The refusal notes an earlier run still owed the sender: posted
-		// once the thread is attached (tellRefused).
-		owed: owedRefusals(r.st.Events), owe: make(chan struct{}, 1), stopTelling: stopTelling, told: make(chan struct{}),
 	}
 	// Which app messages the session has taken in (integration.PhoneLedger),
 	// as the runs before this one left it: a resumed session reads on after
@@ -381,7 +365,7 @@ func (r *Runtime) startPhone() {
 			// is on the record: with the loop closed meanwhile nothing is
 			// given up, and the next run reads again. The poll reads on
 			// from that post, past anything sent while the session was
-			// stopped: said in the session's log, and the sender is owed
+			// stopped: said in the session's log, and the sender is posted
 			// a note saying so (phone.refused), so it is not passed
 			// silently.
 			r.sync(func() {
@@ -438,13 +422,6 @@ func (r *Runtime) startPhone() {
 		p.wg.Add(2)
 		go p.poll(r, started)
 		go p.keeper(r)
-		p.mu.Lock()
-		if !p.paying {
-			p.telling = true
-			p.wg.Add(1)
-			go p.tellRefused(r, tellCtx)
-		}
-		p.mu.Unlock()
 	})
 	// The message the session was started or resumed with is passed to
 	// the agent as it is recorded, before this mirror exists. Its receipt
@@ -754,20 +731,23 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		_ = ev.Decode(&d)
 		p.ask(r, d.ID, d.Text, d.Options)
 	case phoneRefusedEvent:
-		// Something sent was not done: its note is owed until one is posted.
+		// Something sent was not done: the sender is told, in one post
+		// with a key of its own (a patient client tries a keyed post
+		// again through an outage).
 		var d phoneRefusedData
-		if ev.Decode(&d) != nil || d.Posted {
+		if ev.Decode(&d) != nil {
 			return
 		}
-		p.mu.Lock()
-		if !slices.ContainsFunc(p.owed, d.same) {
-			p.owed = append(p.owed, d)
-		}
-		p.mu.Unlock()
-		select {
-		case p.owe <- struct{}{}:
-		default:
-		}
+		p.enqueue(func(ctx context.Context) {
+			act := p.attach()
+			msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: d.Text, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": cmp.Or(d.Kind, "attachment_refused")}, ClientKey: p.noteKey(d), Activity: act})
+			if err != nil {
+				p.say("finalechat: could not tell the phone (%v): %s", shortErr(err), d.Text)
+				return
+			}
+			p.rememberIn(msg, thread)
+			p.markSent(act)
+		})
 	case event.CwdChange:
 		var d event.CwdChangeData
 		_ = ev.Decode(&d)
@@ -1389,8 +1369,8 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				atts = append(atts, saved)
 			}
 			// Once the message is on the record without them, the files
-			// refused are too (phone.refused), and the mirror owes the
-			// sender a note for each until one is posted (tellRefused).
+			// refused are too (phone.refused), and the mirror posts the
+			// sender a note for each.
 			tell := func() {
 				for _, n := range notes {
 					r.append(event.New(phoneRefusedEvent, event.ActorHarness, n))
@@ -1503,11 +1483,10 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 }
 
 // phoneRefusedEvent records that something sent from the phone was not
-// done, so that the sender is owed the note saying so: a file of an app
+// done, and the note the sender is posted saying so: a file of an app
 // message not passed on, the message having been taken without it; a
 // command taken and not run (command_not_run); what was sent while the
-// session was stopped, not read (unread). With Posted, that the note went
-// out.
+// session was stopped, not read (unread).
 const phoneRefusedEvent = "phone.refused"
 
 // phoneRefusedData is a phone.refused event's data.
@@ -1516,16 +1495,9 @@ type phoneRefusedData struct {
 	MessageID    string `json:"message_id"`
 	AttachmentID string `json:"attachment_id,omitempty"`
 	Text         string `json:"text,omitempty"`
-	Posted       bool   `json:"posted,omitempty"`
 }
 
-// same reports that o is the record of the same note as d.
-func (d phoneRefusedData) same(o phoneRefusedData) bool {
-	return d.Kind == o.Kind && d.MessageID == o.MessageID && d.AttachmentID == o.AttachmentID
-}
-
-// noteKey is the note's client key, the same in every run, so a post
-// tried again, or by the next run, shows once.
+// noteKey is the note's client key, so a post tried again shows once.
 func (p *phone) noteKey(d phoneRefusedData) string {
 	switch d.Kind {
 	case "command_not_run":
@@ -1534,151 +1506,6 @@ func (p *phone) noteKey(d phoneRefusedData) string {
 		return p.key("unread", d.MessageID)
 	}
 	return p.key("refused", d.MessageID, d.AttachmentID)
-}
-
-// owedRefusals are the notes the record says the sender is owed: each
-// phone.refused with no posted one for the same note after it.
-func owedRefusals(evs []event.Event) []phoneRefusedData {
-	var out, seen []phoneRefusedData
-	for i := len(evs) - 1; i >= 0; i-- {
-		var d phoneRefusedData
-		if evs[i].Type != phoneRefusedEvent || evs[i].Decode(&d) != nil {
-			continue
-		}
-		if !slices.ContainsFunc(seen, d.same) {
-			seen = append(seen, d) // one note each
-			if !d.Posted {
-				out = append(out, d)
-			}
-		}
-	}
-	slices.Reverse(out)
-	return out
-}
-
-// tellOwed posts each note the sender is owed (p.owed), in order, with a
-// client key of its own, on ctx; one without a key (a post cut off in
-// flight may have gone out, and would show twice posted again) on keyless.
-// Each one posted moves to p.paid, its record to be written. It reports
-// whether one was posted, and whether one could not go; a first failure
-// is said in the log once a note, in said (nil: not said).
-func (p *phone) tellOwed(ctx, keyless context.Context, said map[[3]string]bool) (posted, failed bool) {
-	p.mu.Lock()
-	owed := slices.Clone(p.owed)
-	p.mu.Unlock()
-	for _, n := range owed {
-		key, pctx := p.noteKey(n), ctx
-		if key == "" {
-			pctx = keyless
-		}
-		act := p.attach()
-		msg, thread, err := p.client.Post(pctx, p.ref, finalechat.PostRequest{Body: n.Text, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": cmp.Or(n.Kind, "attachment_refused")}, ClientKey: key, Activity: act})
-		if err != nil {
-			failed = true
-			if k := [3]string{n.Kind, n.MessageID, n.AttachmentID}; said != nil && !said[k] && ctx.Err() == nil {
-				said[k] = true
-				p.say("finalechat: could not tell the phone yet (%v): %s It is tried again until it goes out.", shortErr(err), n.Text)
-			}
-			continue
-		}
-		p.rememberIn(msg, thread)
-		p.markSent(act)
-		posted = true
-		p.mu.Lock()
-		p.owed = slices.DeleteFunc(p.owed, n.same)
-		p.paid = append(p.paid, phoneRefusedData{Kind: n.Kind, MessageID: n.MessageID, AttachmentID: n.AttachmentID, Posted: true})
-		p.mu.Unlock()
-	}
-	return posted, failed
-}
-
-// recordPaid writes the record of each note posted (p.paid) with record.
-func (p *phone) recordPaid(record func(event.Event)) {
-	p.mu.Lock()
-	paid := p.paid
-	p.paid = nil
-	p.mu.Unlock()
-	for _, d := range paid {
-		record(event.New(phoneRefusedEvent, event.ActorHarness, d))
-	}
-}
-
-// tellRefused posts every note the sender is owed (tellOwed), trying again
-// after a growing pause until it goes out, and records each one posted
-// through the loop, until payOwed stops it (ctx). One goroutine per
-// mirror, from the thread's attach.
-func (p *phone) tellRefused(r *Runtime, ctx context.Context) {
-	defer p.wg.Done()
-	defer close(p.told)
-	tries := 0
-	said := map[[3]string]bool{}
-	for ctx.Err() == nil {
-		posted, failed := p.tellOwed(ctx, p.ctx, said)
-		if posted {
-			// A step the loop's end drops leaves them in p.paid, for
-			// payOwed to write.
-			r.post(func() { p.recordPaid(func(ev event.Event) { r.append(ev) }) })
-		}
-		var wait <-chan time.Time
-		if failed {
-			tries++
-			wait = time.After(min(time.Duration(tries)*phoneRetryStep, time.Minute))
-		} else {
-			tries = 0
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-p.owe:
-		case <-wait:
-		}
-	}
-}
-
-// payOwed posts the notes the sender is still owed, before the closing
-// note. It stops tellRefused (a post under way with a client key is cut,
-// one without is let finish) and posts what is left, in order, trying
-// again after a growing pause, for up to phoneCloseWait. record writes the
-// record of each note posted, also one tellRefused posted that the loop
-// did not record (nil writes none); what cannot go in that time stays owed
-// on the record for the next run, and is said in the log. Called as a run
-// ends, after its loop (finish).
-func (p *phone) payOwed(record func(event.Event)) {
-	p.mu.Lock()
-	p.paying = true
-	telling := p.telling
-	p.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), phoneCloseWait)
-	defer cancel()
-	stopped := true
-	if telling {
-		p.stopTelling()
-		select {
-		case <-p.told:
-		case <-ctx.Done():
-			stopped = false // a post without a key under way: none is posted beside it
-		}
-	}
-	if stopped && p.ctx.Err() == nil { // not when the mirror gave up at its start
-		for tries := 1; ctx.Err() == nil; tries++ {
-			if _, failed := p.tellOwed(ctx, ctx, nil); !failed {
-				break
-			}
-			select {
-			case <-ctx.Done():
-			case <-time.After(min(time.Duration(tries)*phoneRetryStep, time.Minute)):
-			}
-		}
-	}
-	if record != nil {
-		p.recordPaid(record)
-	}
-	p.mu.Lock()
-	left := slices.Clone(p.owed)
-	p.mu.Unlock()
-	for _, n := range left {
-		p.say("finalechat: could not tell the phone before the session ended: %s It is told when the session next runs.", n.Text)
-	}
 }
 
 // FromPhone reads what the app says about a message the user sent from the

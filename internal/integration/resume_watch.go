@@ -288,8 +288,8 @@ func (w *resumeWatcher) considerHeld(ctx context.Context, thread finalechat.Thre
 		// As the running mirror does: the session comes back with the
 		// rest of the message, and the sender is told, by the session
 		// that takes it: it records the file refused (phone.refused) in
-		// the step that takes the message, and its mirror posts the note
-		// it owes until it goes out. The watcher says nothing itself, so
+		// the step that takes the message, and its mirror posts the
+		// note. The watcher says nothing itself, so
 		// no notice is posted for a reply not taken.
 		msg.Refused = append(msg.Refused, RefusedFile{AttachmentID: m.Attachments[i].ID, Text: finalechat.RefusedNote(m.Attachments[i].Filename, err)})
 	}

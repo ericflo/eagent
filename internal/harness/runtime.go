@@ -434,7 +434,7 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 	// after it, and the poll reads on from it.
 	r.tookPhoneMessage(opts.PromptPhoneID, wordsFrom)
 	// Its files that could not be fetched, after it, as the poll records
-	// a message's: the mirror owes their notes until they go out.
+	// a message's: the mirror posts a note for each.
 	for _, f := range opts.PromptRefused {
 		r.append(event.New(phoneRefusedEvent, event.ActorHarness, phoneRefusedData{MessageID: opts.PromptPhoneID, AttachmentID: f.AttachmentID, Text: f.Text}))
 	}
@@ -1279,11 +1279,6 @@ queued:
 	if r.turns.silent.Count > 0 {
 		r.appendDirect(event.New(event.Checks, event.ActorEagent, r.turns.silent))
 		r.turns.silent = event.ChecksData{}
-	}
-	if r.phone != nil {
-		// The notes the sender is still owed go out before the closing
-		// note, their records before the end.
-		r.phone.payOwed(r.appendDirect)
 	}
 	r.appendDirect(event.New(event.SessionEnd, event.ActorHarness, event.SessionEndData{Reason: r.endReason}))
 	if r.phone != nil {
