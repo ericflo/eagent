@@ -358,6 +358,38 @@ func TestSummarizerChangesLeaveARouteTheFileAlreadyHasAsWritten(t *testing.T) {
 			t.Fatalf("got %v, and the file is:\n%s", err, raw)
 		}
 	})
+	// The same of the route's fallback: the file and the saved preset in
+	// force each give the summarizer a whole route with a whole fallback,
+	// and a field of the file's fallback is unset from the app (or one is
+	// set where the file has no fallback). Under the preset the two
+	// fallbacks merge and load; alone the file's would not. Refused. (A
+	// last read found a narrower version of the rule letting these in.)
+	t.Run("a field its fallback needs is unset", func(t *testing.T) {
+		const fallback = `{"protocol":"openai-chat","base_url":"https://api.deepinfra.com/v1/openai","model":"zai-org/GLM-5.2","api_key_env":"DEEPINFRA_API_KEY"}`
+		with := strings.Replace(`{`+whole+`}`, `"api_key_env":"TOGETHER_API_KEY"`, `"api_key_env":"TOGETHER_API_KEY","fallback":`+fallback, 1)
+		for _, c := range []struct {
+			name, file string
+			edit       control.Edit
+		}{
+			{"its address", with, control.Edit{Op: "unset", Key: "/summarizer/model/fallback/base_url"}},
+			{"its model", with, control.Edit{Op: "unset", Key: "/summarizer/model/fallback/model"}},
+			{"an effort set where the file has no fallback", `{` + whole + `}`, control.Edit{Op: "set", Key: "/summarizer/model/fallback/reasoning_effort", Value: "low"}},
+		} {
+			for _, how := range []string{"EAGENT_CONFIG", "default_config"} {
+				t.Run(c.name+"/"+how, func(t *testing.T) {
+					file, env := c.file, map[string]string{"EAGENT_CONFIG": "mine"}
+					if how == "default_config" {
+						file, env = `{"default_config":"mine",`+file[1:], nil
+					}
+					project, err := r17Apply(t, r17Case{file: file, bundle: with, env: env, edits: []control.Edit{c.edit}})
+					raw, _ := os.ReadFile(config.File(project))
+					if err == nil || !strings.Contains(err.Error(), "nothing was changed") || string(raw) != file {
+						t.Fatalf("got %v, and the file is:\n%s", err, raw)
+					}
+				})
+			}
+		}
+	})
 }
 
 // EAGENT_MODEL names the model the route already has, so the form shows
