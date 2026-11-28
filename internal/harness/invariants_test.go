@@ -77,7 +77,6 @@ func invReport() (found []string, sessions, requests int) {
 var invRebuiltOtherwise = map[string]string{
 	"tickGen":         "the ticker's generation, set by Run",
 	"finalAsked":      "this run asked for its closing word; a resumed run is a new run",
-	"owedResume":      "handed from init to the start of Run and cleared there; the debt itself (owed, owedTries, owedAnswer) is compared",
 	"rereadTold":      "reset at the start of every dossier pass and read only during one",
 	"futileLogged":    "only the terminal line repeats; the decision reads the notice in the record",
 	"lookedAt":        "pacing of progress looks starts again",
@@ -438,8 +437,8 @@ func TestARequestMayOnlyRewriteWhatARuleAllows(t *testing.T) {
 		}
 	}
 	// And the first check sees a field the record does not rebuild.
-	a, b := turnState{saidSeq: 4, owedTries: 1}, turnState{saidSeq: 4}
-	if d := invCompare(&a, &b); len(d) != 1 || d[0][0] != "owedTries" {
+	a, b := turnState{saidSeq: 4, spokeSeen: 1}, turnState{saidSeq: 4}
+	if d := invCompare(&a, &b); len(d) != 1 || d[0][0] != "spokeSeen" {
 		t.Errorf("a field that differs was reported as %v", d)
 	}
 	a, b = turnState{failures: 2}, turnState{}

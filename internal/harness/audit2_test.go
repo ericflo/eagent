@@ -215,51 +215,6 @@ func TestAudit2HeldAnswerIsSentBackOnce(t *testing.T) {
 
 // ---- 2. an unanswered message stays owed -----------------------------------
 
-// A message kept for eagent that it left unanswered stays owed when newer
-// messages arrive: a second one kept for eagent leaves the oldest as the
-// mark, and an ordinary message does not clear it. The next tail still
-// names every unanswered message.
-func TestAudit2UnansweredMessageStaysOwedAcrossNewerMessages(t *testing.T) {
-	var seen tails
-	s := startSession(t, "", func(_ string, msgs []map[string]any) reply {
-		seen.add(lastUserText(msgs))
-		return hold()
-	}, nil)
-	owed := func() int64 {
-		var o int64
-		s.rt.sync(func() { o = s.rt.turns.owed })
-		return o
-	}
-	s.type_("@e what is Codex up to?")
-	s.waitFor("the message to be owed", func() bool { return owed() != 0 })
-	s.settled()
-	first := owed()
-	if ums := s.events(event.UserMessage); len(ums) != 1 || ums[0].Seq != first {
-		t.Fatalf("owed %d, user messages %+v", first, ums)
-	}
-	s.type_("@e and which branch is it on?")
-	s.waitFor("the second message", func() bool { return len(s.events(event.UserMessage)) == 2 })
-	s.settled()
-	if got := owed(); got != first {
-		t.Fatalf("after a second unanswered message owed is %d, want the oldest %d", got, first)
-	}
-	s.type_("run the unit tests")
-	s.waitFor("the message to reach the agent", func() bool { return len(s.seat.sentTexts()) == 1 })
-	s.settled()
-	if got := owed(); got != first {
-		t.Fatalf("an ordinary message changed owed to %d, want %d", got, first)
-	}
-	tail := seen.find("typed into Codex's terminal as written")
-	if tail == "" { // the look came before the agent's transcript showed it
-		tail = seen.find("passed to Codex as written")
-	}
-	for _, want := range []string{"Also: the user wrote to you more than once", "what is Codex up to?", "and which branch is it on?"} {
-		if !strings.Contains(tail, want) {
-			t.Fatalf("the tail after an ordinary message lacks %q:\n%s", want, tail)
-		}
-	}
-}
-
 // ---- 3. what arrives mid-turn ----------------------------------------------
 
 // Something that arrives while a recorded turn is running gets a tail of

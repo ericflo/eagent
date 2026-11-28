@@ -24,9 +24,6 @@ import (
 // still owed is asked for again later, on the delays every owed answer
 // has.
 func TestOneCallTurnsDoNotRetryTheSameWakeAtOnce(t *testing.T) {
-	old := owedRetryDelays
-	owedRetryDelays = []time.Duration{time.Hour, time.Hour, time.Hour}
-	defer func() { owedRetryDelays = old }()
 	cases := []struct {
 		name  string
 		reply func() reply
@@ -60,41 +57,7 @@ func TestOneCallTurnsDoNotRetryTheSameWakeAtOnce(t *testing.T) {
 			if got := s.ui.messageCount(); got != c.said {
 				t.Fatalf("the user was told %d things, want %d", got, c.said)
 			}
-			var owed int64
-			var armed bool
-			s.rt.sync(func() { owed, armed = s.rt.turns.owed, s.rt.turns.owedTimer != nil })
-			if c.said == 0 && (owed == 0 || !armed) {
-				t.Fatalf("the unanswered message is not asked for again later (owed %d, timer %v)", owed, armed)
-			}
-			if c.said == 1 && owed != 0 {
-				t.Fatal("an answered message is still owed an answer")
-			}
 		})
-	}
-}
-
-// A model that never answers is asked a bounded number of times: once for
-// the message and once per delay, and then eagent says in its log that the
-// message went unanswered.
-func TestOneCallTurnsGiveUpOnAModelThatAlwaysHolds(t *testing.T) {
-	old := owedRetryDelays
-	owedRetryDelays = []time.Duration{30 * time.Millisecond, 30 * time.Millisecond, 30 * time.Millisecond}
-	defer func() { owedRetryDelays = old }()
-	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, func(cfg *config.Config) { cfg.MaxCallsPerTurn = 1 })
-	s.settled()
-	before := s.model.count(testModel)
-	s.type_("@e what is Codex up to?")
-	s.waitFor("eagent to give up", func() bool {
-		for _, l := range s.ui.logged() {
-			if strings.Contains(l, "went unanswered") {
-				return true
-			}
-		}
-		return false
-	})
-	time.Sleep(200 * time.Millisecond)
-	if n := s.model.count(testModel) - before; n != 1+len(owedRetryDelays) {
-		t.Fatalf("a model that always holds was called %d times, want %d", n, 1+len(owedRetryDelays))
 	}
 }
 

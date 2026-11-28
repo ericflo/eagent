@@ -1456,9 +1456,8 @@ func (r *Runtime) checkIdleAgents() {
 		return
 	}
 	// Anything still open keeps the agent and asks nothing: a question,
-	// even a dismissed one (a dismissal decides nothing), a timer, a
-	// message owed an answer.
-	if r.st.Question != nil || r.st.DismissalStands() || len(r.st.ActiveSchedules()) > 0 || r.turns.owed > 0 {
+	// even a dismissed one (a dismissal decides nothing), a timer.
+	if r.st.Question != nil || r.st.DismissalStands() || len(r.st.ActiveSchedules()) > 0 {
 		return
 	}
 	window := time.Duration(r.cfg.Finalechat.QuestionTimeout()) * questionSecond

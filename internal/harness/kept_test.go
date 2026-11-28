@@ -104,22 +104,14 @@ func stopsWhenDone() reply {
 // holds is told once that holding is not an answer; if it still says
 // nothing it is woken again for that message alone until it has answered.
 func TestAMessageKeptForEagentIsNeverLeftUnanswered(t *testing.T) {
-	old := owedRetryDelays
-	owedRetryDelays = []time.Duration{30 * time.Millisecond, 30 * time.Millisecond, 30 * time.Millisecond}
-	defer func() { owedRetryDelays = old }()
 	var mu sync.Mutex
-	reminded, woken := 0, 0
+	reminded := 0
 	s := startSession(t, "", func(_ string, msgs []map[string]any) reply {
 		mu.Lock()
 		defer mu.Unlock()
-		switch {
-		case strings.Contains(lastText(msgs), "Holding is not an answer"):
+		if strings.Contains(lastText(msgs), "Holding is not an answer") {
 			reminded++
-		case strings.Contains(lastUserText(msgs), "has had no answer"):
-			woken++
-			if woken == 2 {
-				return say("Codex is idle; nothing has been asked of it yet.")
-			}
+			return say("Codex is idle; nothing has been asked of it yet.")
 		}
 		return hold()
 	}, nil)
@@ -127,15 +119,10 @@ func TestAMessageKeptForEagentIsNeverLeftUnanswered(t *testing.T) {
 	s.waitFor("the answer", func() bool { return s.ui.messageCount() == 1 })
 	s.settled()
 	mu.Lock()
-	r, w := reminded, woken
+	r := reminded
 	mu.Unlock()
-	if r < 1 || w != 2 {
-		t.Fatalf("reminded %d times in the first call's turn, woken again %d times", r, w)
-	}
-	var owed int64
-	s.rt.sync(func() { owed = s.rt.turns.owed })
-	if owed != 0 {
-		t.Fatal("the message is still counted as unanswered after the answer")
+	if r != 1 {
+		t.Fatalf("a hold on a message kept for eagent was sent back %d times, want once", r)
 	}
 	// Answered: nothing wakes the model for it again.
 	base := s.model.count(testModel)

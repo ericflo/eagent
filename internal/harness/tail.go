@@ -181,8 +181,6 @@ func (r *Runtime) tail(w wake, now time.Time) string {
 		b.WriteString(strings.Join(reasons, "\n"))
 	case w.look:
 		b.WriteString("A look while the work goes on.")
-	case w.owed:
-		b.WriteString(r.owedTail(who, true))
 	case w.final:
 		switch {
 		case t.saidAt.IsZero():
@@ -195,9 +193,6 @@ func (r *Runtime) tail(w wake, now time.Time) string {
 	default:
 		b.WriteString("Nothing has happened; this look is only about the thread's title and summary.")
 	}
-	if t.owed > 0 && !w.owed {
-		b.WriteString("\n" + r.owedTail(who, false))
-	}
 
 	// What is true right now.
 	if len(active) == 0 {
@@ -205,7 +200,7 @@ func (r *Runtime) tail(w wake, now time.Time) string {
 	}
 	for _, rel := range active {
 		fmt.Fprintf(&b, "\n%s", r.agentLine(rel, now))
-		if ap := rel.Autopilot; ap != nil && !w.look && (w.event || w.owed) {
+		if ap := rel.Autopilot; ap != nil && !w.look && w.event {
 			// The standing order in full, every time eagent is woken to
 			// act: it is what the decision is made from.
 			fmt.Fprintf(&b, " The standing order: %s. When %s ends a turn having stopped, with nothing of its own still running, send it on with relay_send toward what is still missing", clipRunes(oneLine(ap.Instruction, 300), 300), rel.Who())
@@ -522,82 +517,6 @@ func (r *Runtime) noticeTail() string {
 		}
 	}
 	return "A notice for you is above. Do what it calls for."
-}
-
-// owedTail reminds eagent of what the user wrote to it that has had no
-// answer: the oldest such message and every one kept for it since. alone
-// says the call was made for this only.
-func (r *Runtime) owedTail(who string, alone bool) string {
-	clock := func(t time.Time) string { return t.In(r.st.Location()).Format("15:04") }
-	if r.turns.owedAnswer {
-		// Not a message kept for eagent but the user's answer to its
-		// question, held on with nothing done.
-		lead := "Also: the"
-		if alone {
-			lead = "The"
-		}
-		for _, ev := range r.st.Events {
-			if ev.Seq != r.turns.owed || ev.Type != event.UserAnswer {
-				continue
-			}
-			var d event.UserAnswerData
-			_ = ev.Decode(&d)
-			return fmt.Sprintf("%s user answered your question at %s (%q) and nothing has been done with the answer: it has reached nobody but you. If %s is waiting on it, give it to %s with relay_send in words it can act on; if the question was only yours, do what the answer calls for, or tell the user what happens next. Hold only if the answer needs nothing done.", lead, clock(ev.Time), clipRunes(oneLine(d.Text, 300), 300), who, who)
-		}
-	}
-	type kept struct {
-		text string
-		at   time.Time
-	}
-	var list []kept
-	for _, ev := range r.st.Events {
-		if ev.Seq < r.turns.owed || ev.Type != event.UserMessage {
-			continue
-		}
-		var d event.UserMessageData
-		if ev.Decode(&d) == nil && (d.Held != "" || ev.Seq == r.turns.owed) {
-			list = append(list, kept{d.Text, ev.Time})
-		}
-	}
-	lead := "Also: the"
-	if alone {
-		lead = "The"
-	}
-	const tailEnd = "kept for you, so nobody else will answer. Answer now with send_message, or pass it on with relay_forward if it is for %s."
-	// An answer to eagent's question held on beside the message is part of
-	// the same debt (turnEnding.settle): it is named with it.
-	var answers []string
-	for _, ev := range r.st.Events {
-		if ev.Seq < r.turns.owed || ev.Type != event.UserAnswer {
-			continue
-		}
-		var d event.UserAnswerData
-		if ev.Decode(&d) == nil {
-			answers = append(answers, fmt.Sprintf(" They also answered your question at %s (%q), and nothing has been done with the answer: it has reached nobody but you. If %s is waiting on it, give it to %s with relay_send in words it can act on; if the question was only yours, do what the answer calls for.", clock(ev.Time), clipRunes(oneLine(d.Text, 300), 300), who, who))
-		}
-	}
-	if len(list) <= 1 {
-		var k kept
-		if len(list) == 1 {
-			k = list[0]
-		}
-		return fmt.Sprintf("%s user wrote to you at %s and has had no answer and seen nothing done about it: %q. It was "+tailEnd, lead, clock(k.at), clipRunes(oneLine(k.text, 300), 300), who) + strings.Join(answers, "")
-	}
-	// Oldest first, as they were written. Past four, the rest are pointed at
-	// by their time rather than quoted: they are in the conversation above,
-	// and a long reminder would crowd out what the call is for.
-	var quoted, later []string
-	for i, k := range list {
-		if i < 4 {
-			quoted = append(quoted, fmt.Sprintf("at %s %q", clock(k.at), clipRunes(oneLine(k.text, 300), 300)))
-		} else {
-			later = append(later, clock(k.at))
-		}
-	}
-	if len(later) > 0 {
-		quoted = append(quoted, fmt.Sprintf("and %d more after those, above (at %s)", len(later), strings.Join(later, ", ")))
-	}
-	return fmt.Sprintf("%s user wrote to you more than once and has had no answer and seen nothing done about it: %s. These were "+tailEnd, lead, strings.Join(quoted, "; "), who) + strings.Join(answers, "")
 }
 
 // threadTail asks about the thread's title and summary.

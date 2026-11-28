@@ -136,20 +136,14 @@ func cutCheck(t *testing.T, sid string, evs []event.Event, model *scripted) {
 			}
 		}
 		for _, u := range users {
-			shown, owed := false, false
+			shown := false
 			for _, ev := range after {
 				if cutSeen(ev) >= u.Seq {
 					shown = true
 				}
-				if ev.Type == event.Owed && ev.Seq > prefix[cut-1].Seq {
-					var d event.OwedData
-					if ev.Decode(&d) == nil && d.Seq == u.Seq {
-						owed = true
-					}
-				}
 			}
-			if !shown && !owed {
-				t.Errorf("%s: user message seq %d was passed over (never in a model call's view, not left owed)", at, u.Seq)
+			if !shown {
+				t.Errorf("%s: user message seq %d was passed over (never in a model call's view)", at, u.Seq)
 			}
 		}
 		if len(users) == 0 {

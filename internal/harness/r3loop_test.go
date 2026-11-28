@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
@@ -89,8 +88,6 @@ func TestOneReplyStillSendsOneMessage(t *testing.T) {
 // that turn, even when the turn has already said something about the
 // message before it.
 func TestAMessageArrivingMidTurnIsAnsweredInThatTurn(t *testing.T) {
-	old := owedRetryDelays
-	defer func() { owedRetryDelays = old }()
 	gate := make(chan struct{})
 	var calls atomic.Int32
 	brain := func(_ string, msgs []map[string]any) reply {
@@ -130,11 +127,6 @@ func TestAMessageArrivingMidTurnIsAnsweredInThatTurn(t *testing.T) {
 	s.settled()
 	if refused := s.refusedSends(); len(refused) > 0 {
 		t.Fatalf("the answer to the second message was refused: %q", refused[0])
-	}
-	var owed int64
-	s.rt.sync(func() { owed = s.rt.turns.owed })
-	if owed != 0 {
-		t.Fatal("the second message is still owed an answer after the turn answered it")
 	}
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("the two messages took %d calls, want 2", n)
@@ -537,74 +529,9 @@ func TestDossierWrittenFromTheRecordGetsItsOwnRewrite(t *testing.T) {
 	}
 }
 
-// The user's answer to a question of eagent's has reached nobody but the
-// model. A hold on it is sent back once with that said. A turn with no
-// call left cannot do that, so the reminder comes later, once, and what
-// the model does then stands.
-func TestAnAnswerHeldOnWithNoCallLeftIsBroughtUpOnceMore(t *testing.T) {
-	old := owedRetryDelays
-	owedRetryDelays = []time.Duration{10 * time.Millisecond, time.Hour, time.Hour}
-	defer func() { owedRetryDelays = old }()
-	for _, c := range []struct {
-		name   string
-		passes bool // the model passes the answer on when reminded
-	}{{"passes it on when reminded", true}, {"holds again", false}} {
-		t.Run(c.name, func(t *testing.T) {
-			var reminded atomic.Int32
-			brain := func(_ string, msgs []map[string]any) reply {
-				last := lastUserText(msgs)
-				switch {
-				case strings.Contains(last, "kept for you") && msgs[len(msgs)-1]["role"] != "tool":
-					return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Merge to main, or open a pull request?"}`)}}
-				case strings.Contains(last, "nothing has been done with the answer"):
-					reminded.Add(1)
-					if c.passes && msgs[len(msgs)-1]["role"] != "tool" {
-						return reply{calls: []event.ToolCall{tc("relay_send", `{"text":"The user says: merge to main."}`)}}
-					}
-				}
-				return hold()
-			}
-			s := startSession(t, "", brain, func(cfg *config.Config) { cfg.MaxCallsPerTurn = 1 })
-			s.settled()
-			s.type_("@e what next?")
-			s.waitFor("the question", func() bool { return s.ui.askedCount() == 1 })
-			s.settled()
-			before := s.model.count(testModel)
-			s.type_("main")
-			s.waitFor("the reminder", func() bool { return reminded.Load() >= 1 })
-			s.settled()
-			time.Sleep(10 * owedRetryDelays[0]) // ten of the first delay: a second reminder would come in one
-			s.settled()
-			if n := reminded.Load(); n != 1 {
-				t.Fatalf("the model was reminded of the answer %d times, want once", n)
-			}
-			var owed int64
-			s.rt.sync(func() { owed = s.rt.turns.owed })
-			if owed != 0 {
-				t.Fatal("the answer is still owed after its one reminder")
-			}
-			sent := s.seat.sentTexts()
-			if c.passes && (len(sent) != 1 || !strings.Contains(sent[0], "merge to main")) {
-				t.Fatalf("the agent was sent %q, want the answer passed on", sent)
-			}
-			if !c.passes && len(sent) != 0 {
-				t.Fatalf("the agent was sent %q by a model that held", sent)
-			}
-			// The model that passed it on is called again for the agent's
-			// reply; the one that held is not called again at all.
-			if n := s.model.count(testModel) - before; !c.passes && n != 2 {
-				t.Fatalf("the answer took %d calls, want the one that held and the one reminder", n)
-			}
-		})
-	}
-}
-
 // With calls to spare nothing changes: the hold on an answer is sent back
 // in the same turn, once, and no later call is made for it.
 func TestAnAnswerHeldOnIsSentBackOnceInItsTurn(t *testing.T) {
-	old := owedRetryDelays
-	owedRetryDelays = []time.Duration{10 * time.Millisecond, time.Hour, time.Hour}
-	defer func() { owedRetryDelays = old }()
 	brain := func(_ string, msgs []map[string]any) reply {
 		if strings.Contains(lastUserText(msgs), "kept for you") && msgs[len(msgs)-1]["role"] != "tool" {
 			return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Merge to main, or open a pull request?"}`)}}
@@ -620,14 +547,7 @@ func TestAnAnswerHeldOnIsSentBackOnceInItsTurn(t *testing.T) {
 	s.type_("main")
 	s.waitFor("the two calls", func() bool { return s.model.count(testModel)-before >= 2 })
 	s.settled()
-	time.Sleep(10 * owedRetryDelays[0]) // ten of the first delay: a later call would come in one
-	s.settled()
 	if n := s.model.count(testModel) - before; n != 2 {
 		t.Fatalf("the answer took %d calls, want the hold and the one sent back", n)
-	}
-	var owed int64
-	s.rt.sync(func() { owed = s.rt.turns.owed })
-	if owed != 0 {
-		t.Fatal("an answer that was sent back in its turn is owed a later reminder as well")
 	}
 }

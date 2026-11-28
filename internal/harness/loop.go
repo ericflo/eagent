@@ -62,7 +62,6 @@ type wake struct {
 	moved  bool // (look) something has happened since the user last heard
 	steps  int  // (look) how many steps the agents had taken when it was started
 	thread bool // the thread's title and summary may be out of date
-	owed   bool // a message the user wrote to eagent is still unanswered
 	final  bool // the session is about to end: the closing word
 	// wait bounds the whole turn: the last title and summary of a session
 	// that is about to end must not hold the end for long.
@@ -83,8 +82,6 @@ func (w wake) reason() string {
 		return "a notice from eagent"
 	case w.look:
 		return "progress while the agent works"
-	case w.owed:
-		return "a message for eagent is still unanswered"
 	case w.final:
 		return "the session is ending"
 	}
@@ -158,22 +155,6 @@ type turnState struct {
 	// thing this loop does is write a dossier from its files (resume.go).
 	adopt bool
 
-	// owed is a message the user wrote to eagent itself that was looked at
-	// and left with no answer and nothing done about it. Until that
-	// changes every call is told so, and a call is made for it alone a few
-	// times, further and further apart.
-	owed      int64
-	owedTries int
-	owedTimer *time.Timer
-	// owedAnswer: what is owed is not a message but the user's answer to
-	// a question of eagent's, held on in a turn that had no call left to
-	// say it has reached nobody else. It is said once, later, and a hold
-	// after that stands: an answer can need nothing done.
-	owedAnswer bool
-	// owedResume is the newest record of the debt (event.Owed) of a
-	// resumed session, taken up when the loop starts (resumeOwed).
-	owedResume *owedRecord
-
 	// capRuns counts the turns in a row that stopped at the call limit
 	// with an agent still stuck on its screen.
 	capRuns int
@@ -184,29 +165,20 @@ type turnState struct {
 	finalBusy  bool
 }
 
-// owedRecord is what a resumed session read of the debt it was left.
-type owedRecord struct {
-	at      time.Time
-	started bool
-}
-
 // init reads, from a replayed log, what the loop would otherwise have had
 // in memory. Called once, before the loop starts.
 func (t *turnState) init(st *state.State) {
-	var owed *event.Event
 	// A log from the three-actor design: its events were weighed by actors
 	// that no longer exist, so nothing in it is owed a look. The one loop
 	// takes over from the end of it, where its first run here began.
 	legacy, tookOver := st.Legacy(), false
-	for i, ev := range st.Events {
+	for _, ev := range st.Events {
 		switch {
 		case legacy && !tookOver && ev.Type == event.SessionResume:
 			var d event.SessionResumeData
 			if ev.Decode(&d) == nil && d.PhoneLedger {
 				tookOver, t.seen = true, max(t.seen, d.After)
 			}
-		case ev.Type == event.Owed:
-			owed = &st.Events[i]
 		case ev.Type == event.Assistant && ev.Actor == event.ActorEagent:
 			var d event.AssistantData
 			if ev.Decode(&d) == nil && d.SeenSeq > t.seen {
@@ -308,14 +280,6 @@ func (t *turnState) init(st *state.State) {
 				t.wakes[k] = ev.Seq
 			}
 		}
-	}
-	// A message that was looked at and left unanswered is no longer owed a
-	// look, but it is still owed an answer, and the reminders already
-	// arranged for it count.
-	var d event.OwedData
-	if owed != nil && owed.Decode(&d) == nil && d.Seq > 0 {
-		t.owed, t.owedTries, t.owedAnswer = d.Seq, d.Tries, d.Answer
-		t.owedResume = &owedRecord{at: owed.Time, started: d.Started}
 	}
 }
 
@@ -474,14 +438,6 @@ func (r *Runtime) maybeTurn() {
 		r.startDossier()
 		return
 	}
-	if t.owed > 0 && t.owedTimer == nil {
-		// Written before the call, so that a session stopped while it is
-		// out counts it when resumed: stopping and resuming over and over
-		// does not start the reminders over.
-		r.recordOwed(true)
-		r.startTurn(wake{owed: true, thread: t.threadDue || r.summaryRipe()})
-		return
-	}
 	if t.threadDue {
 		r.startTurn(wake{thread: true})
 	}
@@ -502,134 +458,8 @@ func (r *Runtime) restartAtQuiet() bool {
 
 // ---- a message for eagent is answered -------------------------------------
 
-// owedRetryDelays space out the calls made only because a message the user
-// wrote to eagent is still unanswered.
-var owedRetryDelays = []time.Duration{15 * time.Second, time.Minute, 5 * time.Minute}
-
-// oweAnswer notes that the message at seq was looked at and left
-// unanswered, and arranges another call for it. Loop goroutine.
-func (r *Runtime) oweAnswer(seq int64) {
-	t := &r.turns
-	if t.owedAnswer {
-		// A message kept for eagent comes before a reminder about an
-		// answer, and is what the calls are now made for.
-		t.owed, t.owedTries, t.owedAnswer = 0, 0, false
-	}
-	switch {
-	case t.owed == 0:
-		t.owed, t.owedTries = seq, 0
-	case seq != t.owed:
-		// Another one joins the one still unanswered: the oldest is the
-		// mark (the reminder names every message since), and the
-		// reminders start over.
-		t.owed, t.owedTries = min(t.owed, seq), 0
-	}
-	if t.owedTimer != nil {
-		t.owedTimer.Stop()
-		t.owedTimer = nil
-	}
-	if t.owedTries >= len(owedRetryDelays) {
-		r.ui.Log("eagent: a message addressed to it went unanswered after %d reminders", t.owedTries+1)
-		t.owed, t.owedTries = 0, 0
-		r.recordOwed(false)
-		return
-	}
-	d := owedRetryDelays[t.owedTries]
-	t.owedTries++
-	r.armOwed(d)
-	r.recordOwed(false)
-}
-
-// armOwed sets the timer after which a call is made for what is owed.
-// Loop goroutine.
-func (r *Runtime) armOwed(d time.Duration) {
-	t := &r.turns
-	if t.owedTimer != nil {
-		t.owedTimer.Stop()
-	}
-	// As for the settle timer (noteWake): a stale callback clears only
-	// its own timer, or the next reminder would go out at once.
-	var tm *time.Timer
-	tm = time.AfterFunc(d, func() {
-		r.post(func() {
-			if r.turns.owedTimer == tm {
-				r.turns.owedTimer = nil
-			}
-		})
-	})
-	t.owedTimer = tm
-}
-
-// recordOwed writes the debt as it now stands (event.Owed), so that a
-// resumed session keeps asking where this one stopped. started says the
-// reminder numbered owedTries is going out now. Nothing is written for a
-// session that never owed anything. Loop goroutine.
-func (r *Runtime) recordOwed(started bool) {
-	t := &r.turns
-	d := event.OwedData{Seq: t.owed, Answer: t.owedAnswer, Tries: t.owedTries, Started: started}
-	if t.owed == 0 {
-		d = event.OwedData{}
-	}
-	r.append(event.New(event.Owed, event.ActorEagent, d))
-}
-
-// resumeOwed takes up the debt a resumed session was left (turnState.init):
-// the reminder that was waiting on its delay is due when it would have
-// been, counted from when it was arranged, and one that had gone out
-// counts as made, as if it had come back holding. Loop goroutine, once,
-// before the loop starts.
-func (r *Runtime) resumeOwed() {
-	t := &r.turns
-	rec := t.owedResume
-	t.owedResume = nil
-	if t.owed == 0 || rec == nil {
-		return
-	}
-	switch {
-	case rec.started && t.owedAnswer:
-		// An answer has one reminder; a hold after it stands.
-		r.clearOwed()
-	case rec.started:
-		r.oweAnswer(t.owed)
-	default:
-		i := min(max(t.owedTries-1, 0), len(owedRetryDelays)-1)
-		r.armOwed(max(time.Until(rec.at.Add(owedRetryDelays[i])), 0))
-	}
-}
-
-// oweReminder arranges one later call about the user's answer at seq,
-// which a turn with no call left held on without being told that nobody
-// else has seen it. Nothing is arranged while a message kept for eagent is
-// already owed: its retries come first. Loop goroutine.
-func (r *Runtime) oweReminder(seq int64) {
-	t := &r.turns
-	if t.owed != 0 {
-		return
-	}
-	t.owed, t.owedTries, t.owedAnswer = seq, 1, true
-	r.armOwed(owedRetryDelays[0])
-	r.recordOwed(false)
-}
-
-// clearOwed forgets the unanswered message: it was answered or acted on.
-// Loop goroutine.
-func (r *Runtime) clearOwed() {
-	t := &r.turns
-	was := t.owed
-	t.owed, t.owedTries, t.owedAnswer = 0, 0, false
-	if t.owedTimer != nil {
-		t.owedTimer.Stop()
-		t.owedTimer = nil
-	}
-	if was != 0 {
-		r.recordOwed(false)
-	}
-}
-
 // heldSince returns the oldest message the user wrote that was kept for
-// eagent and has not been looked at, or 0. The oldest is the mark of what
-// is owed: the reminder names it and every one kept since (owedTail), so
-// two that arrive in one wake are both brought up. Loop goroutine.
+// eagent and has not been looked at, or 0. Loop goroutine.
 func (r *Runtime) heldSince(seen int64) int64 {
 	var oldest int64
 	for i := len(r.st.Events) - 1; i >= 0; i-- {
@@ -782,7 +612,7 @@ func (r *Runtime) startTurn(w wake) {
 	t.finalBusy = w.final
 	if w.thread {
 		t.threadDue = false
-		if r.summary.final && !w.event && !w.owed && !w.look && !w.final {
+		if r.summary.final && !w.event && !w.look && !w.final {
 			w.wait = summaryFinalWait // as the dedicated call is (summary.go)
 		}
 	}
@@ -853,11 +683,9 @@ func (r *Runtime) turn(w wake) {
 	var mustSpeak, answered bool
 	var held, covered int64
 	// answerSeq is the answer this turn was woken for (0 for none), and
-	// answerDebt says the turn was told of an answer owed a reminder.
 	// answerMark is how many calls had dealt with something (tc.dealt)
 	// when the answer was first shown: only one after that deals with it.
 	var answerSeq int64
-	answerDebt := false
 	answerMark := 0
 	answerDealt := func() bool { return answerSeq == 0 || tc.dealt > answerMark }
 	var base []llm.Message
@@ -918,7 +746,7 @@ func (r *Runtime) turn(w wake) {
 			}
 			refresh = false
 			base, covered = r.st.View(&r.view), r.st.LastSeq()
-			first, owed := tail == "", w.owed
+			first := tail == ""
 			fresh := first
 			if !first || !w.event {
 				// Only something that asks for a look gets a tail of its
@@ -934,25 +762,9 @@ func (r *Runtime) turn(w wake) {
 			}
 			if fresh {
 				if h := r.heldSince(r.turns.seen); h > 0 {
-					// Not answered by what the turn did before it came. One
-					// kept earlier in this turn and not dealt with yet stays
-					// the mark: the newer one joins it. One that is already
-					// the debt does not: the newer one is what is owed now,
-					// and joining the debt starts its reminders over
-					// (oweAnswer), so it is not given up with the old one.
-					if held == 0 || tc.handled || h < held || held == r.turns.owed {
-						held = h
-					}
+					// Not answered by what the turn did before it came.
+					held = h
 					tc.handled = tc.handled && first
-				}
-				if first && r.turns.owed > 0 && r.turns.owedAnswer {
-					// Its tail says the answer has reached nobody else
-					// (owedTail), in the call made for that alone or in
-					// one made for something else. That is the reminder:
-					// a hold is not sent back with it again.
-					answerDebt, remindedAnswer = true, true
-				} else if first && owed && held == 0 {
-					held = r.turns.owed
 				}
 				if seq := r.answeredSince(r.turns.seen); seq > 0 {
 					// One that arrives while the turn runs is not dealt
@@ -1091,8 +903,8 @@ func (r *Runtime) turn(w wake) {
 		// turn would start at once with the same wake and its reminders
 		// unspent: with max_calls_per_turn at 1, a model that held on a
 		// message kept for eagent was called again without end. On the last
-		// call a reply stands as it came, and what is still owed is asked
-		// for again later (oweAnswer, the closing word's fallback).
+		// call a reply stands as it came (the closing word has its own
+		// fallback).
 		last := call == maxCalls
 		if acts == 0 {
 			// A reply that reaches no one. Some are sent back once, off the
@@ -1240,38 +1052,6 @@ func (r *Runtime) turn(w wake) {
 			}
 			r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: reason}))
 		}
-		e := turnEnding{
-			cut:            end == "error" || end == "interrupted" || end == "timeout",
-			handled:        tc.handled,
-			held:           held > 0,
-			heldSeen:       held > 0 && held <= r.turns.seen,
-			heldOwed:       held > 0 && held == r.turns.owed,
-			answer:         answerSeq > 0,
-			answerDealt:    answerDealt(),
-			answerSeen:     answerSeq > 0 && answerSeq <= r.turns.seen,
-			remindedAnswer: remindedAnswer,
-			answerDebt:     answerDebt,
-		}
-		switch e.settle() {
-		case clearDebt:
-			r.clearOwed()
-		case oweMessage:
-			r.oweAnswer(held)
-		case oweBoth:
-			r.oweAnswer(min(held, answerSeq))
-		case oweTheAnswer:
-			if e.handled || e.answerDebt {
-				r.clearOwed()
-			}
-			r.oweReminder(answerSeq)
-		case keepDebt:
-			if t := &r.turns; e.cut && e.heldOwed && t.overflowed && t.owedTimer == nil {
-				// The reminder itself was refused as too long, and the
-				// conversation is restarted for it: it is tried again
-				// after its own delay, not at once after each restart.
-				r.armOwed(owedRetryDelays[min(max(t.owedTries-1, 0), len(owedRetryDelays)-1)])
-			}
-		}
 		if end == "call limit" {
 			r.afterCallLimit(maxCalls)
 		}
@@ -1294,110 +1074,6 @@ func (r *Runtime) turn(w wake) {
 			}
 		}
 	})
-}
-
-// turnEnding is what the end of a turn knows about what it owes the user.
-type turnEnding struct {
-	// cut: the turn ended on an error, was stopped under it (interrupted),
-	// or ran out of its own time (timeout). Otherwise its last call came
-	// back (it replied, held, or reached the call limit).
-	cut bool
-	// handled: some call of the turn answered the user or did something
-	// with the agent (tc.handled).
-	handled bool
-	// held: a message kept for eagent that the turn was shown (the mark).
-	// heldSeen: a call that came back has seen it, so no wake will bring
-	// it up again. heldOwed: it is already the debt being reminded about.
-	held, heldSeen, heldOwed bool
-	// answer: the user answered a question and the turn was shown it.
-	// answerDealt: a call after it was shown answered or acted.
-	// answerSeen: a call that came back has seen it (no wake left for it).
-	// remindedAnswer: the turn already told the model the answer reached
-	// nobody else (sent back, or said in the tail of a reminder).
-	answer, answerDealt, answerSeen, remindedAnswer bool
-	// answerDebt: the turn was made with an earlier answer owed its one
-	// reminder, and its tail was that reminder.
-	answerDebt bool
-}
-
-// turnSettle is what the end of a turn does with the debt (turnState.owed).
-type turnSettle int
-
-const (
-	keepDebt     turnSettle = iota // leave it as it stands
-	clearDebt                      // clearOwed: nothing is owed
-	oweMessage                     // oweAnswer(held): the message is owed a reminder
-	oweTheAnswer                   // oweReminder(answer), after clearing what was dealt with
-	// oweBoth: oweAnswer from the older of the message and the answer.
-	// The debt is the messages and answers from that mark on, and each of
-	// its reminders names them all (owedTail).
-	oweBoth
-)
-
-// settle decides what a turn leaves owed. The rule, by what happened in the
-// turn (rows, first match wins) and how it ended (replied or held: its
-// last call came back; cut: error, interrupted or timeout):
-//
-//	what happened in the turn                          replied/held   cut
-//	a message shown, nothing done about it, and an     owe both       owe both if a call that came
-//	  answer pending (as in the next row but one)                     back saw the message and it was
-//	                                                                  not already the debt; else keep
-//	a message shown, nothing done about it             owe message    owe message if a call that
-//	                                                                  came back saw it and it was
-//	                                                                  not already the debt; else keep
-//	an answer shown, nothing done after it, seen by    owe answer     owe answer (sent back
-//	  a call that came back; not yet sent back                        or not)
-//	  (replied/held) or sent back or not (cut)
-//	something done (the message answered, or the       clear          clear
-//	  answer acted on)
-//	nothing done                                       see below      keep
-//	  the turn was the answer's reminder               clear (a hold after it stands)
-//	  otherwise                                        keep
-//
-// Why "keep" on a cut: what asked for the look was not seen by a call that
-// came back, so its wake is still pending and the retry (or the resumed
-// run) makes the look again; an earlier debt keeps its own reminder. Why
-// "owe" on a cut when a call that came back saw it: that look is spent,
-// nothing will wake for it again, and the turn did nothing with it, so it
-// would reach nobody. This holds with no earlier debt too: an answer seen
-// by a look and then cut off is owed its one reminder, even when it had
-// been sent back in the turn: a hold after the send-back stands, but here
-// the model's next word was cut off, not a hold. A message that is
-// already the debt is left alone on a cut: a provider failure does not use
-// up its reminders. "Owe answer" clears first what the turn dealt with (the
-// message it answered, an earlier answer's spent reminder), so nothing
-// already said is brought up again. While a message for eagent is owed,
-// an answer is not owed on its own (oweReminder does nothing): the debt
-// runs from its mark, the older of the two, and every reminder of it names
-// the messages and the answers since the mark (owedTail), so the answer is
-// brought up with the message and settled with it. On a cut where the
-// message was already the debt ("keep"), a newer answer is past the mark
-// and is named by the retried reminder. One act after both were shown
-// deals with both: what it was for cannot be told apart. A message that
-// arrives after the answer was acted on resets that (heldSince), so it is
-// still owed.
-func (e turnEnding) settle() turnSettle {
-	pending := e.answer && !e.answerDealt && e.answerSeen && (!e.remindedAnswer || e.cut)
-	switch {
-	case e.held && !e.handled && (!e.cut || (e.heldSeen && !e.heldOwed)):
-		if pending {
-			return oweBoth
-		}
-		return oweMessage
-	case e.held && !e.handled && e.cut && e.heldOwed:
-		// The reminder that was the debt is tried again as it was, and
-		// names any answer that came after its mark.
-		return keepDebt
-	case pending:
-		return oweTheAnswer
-	case e.handled:
-		return clearDebt
-	case e.cut:
-		return keepDebt
-	case e.answerDebt:
-		return clearDebt
-	}
-	return keepDebt
 }
 
 // closingWordOwed says whether a session that is ending owes the user a
@@ -1881,7 +1557,7 @@ func (r *Runtime) whileDown() string {
 // stopTimers stops the loop's timers at the end of a run.
 func (r *Runtime) stopTimers() {
 	t := &r.turns
-	for _, tm := range []*time.Timer{t.ticker, t.settle, t.retryTime, t.owedTimer} {
+	for _, tm := range []*time.Timer{t.ticker, t.settle, t.retryTime} {
 		if tm != nil {
 			tm.Stop()
 		}
