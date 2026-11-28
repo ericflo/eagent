@@ -365,7 +365,7 @@ func (r *Runtime) userTail(who string) string {
 	}
 	// What a message typed into the agent's terminal is said to have done
 	// follows its send's outcome on the record.
-	var passed, waiting, failed, unsure int
+	var passed, waiting, failed, unsure, late int
 	// When the messages ended differently, each sentence names the ones
 	// it is about, quoted, in the order they were written.
 	sends := r.passedSends()
@@ -380,6 +380,11 @@ func (r *Runtime) userTail(who string) string {
 		switch r.st.SendOutcome(sends[seq]) {
 		case state.SendArrived:
 			n = &passed
+			if r.st.ArrivedLate(sends[seq]) {
+				// Not "it reached the agent": the agent it was typed into
+				// may be stopped or replaced by now.
+				n = &late
+			}
 		case state.SendWaiting, state.SendHeld:
 			n = &waiting
 		case state.SendUnconfirmed:
@@ -421,6 +426,9 @@ func (r *Runtime) userTail(who string) string {
 	if unsure > 0 {
 		parts = append(parts, fmt.Sprintf("The user wrote, and whether the message%s reached %s could not be confirmed. Look at relay_screen, then send it again or say what is wrong.", which(&unsure), who))
 	}
+	if late > 0 {
+		parts = append(parts, fmt.Sprintf("The user wrote, and the message%s, which could not be confirmed at first, %s", which(&late), arrivedLate))
+	}
 	if len(parts) == 0 {
 		return "The user wrote."
 	}
@@ -449,6 +457,12 @@ func (r *Runtime) passedSends() map[int64]string {
 	return out
 }
 
+// arrivedLate ends the sentence about a send whose arrival showed only
+// after the record had said it was in doubt. It says where the send
+// arrived and no more: whether an agent running now has it is for the
+// model to see.
+const arrivedLate = "did arrive in the agent it was typed into. If that agent was stopped, started again or replaced since, look at relay_screen to see whether an agent running now is acting on it before sending it again."
+
 // attentionTail says what an agent needs, from the newest event that is
 // still owed a look.
 func (r *Runtime) attentionTail(fallback string) string {
@@ -458,7 +472,7 @@ func (r *Runtime) attentionTail(fallback string) string {
 		if ev.Seq <= r.turns.seen {
 			break
 		}
-		if !state.NeedsAttention(ev) || ev.Type == event.RelayTurn {
+		if !r.st.NeedsAttention(ev) || ev.Type == event.RelayTurn {
 			continue
 		}
 		var name struct {
@@ -485,9 +499,10 @@ func (r *Runtime) attentionTail(fallback string) string {
 					return "" // the user's message it carried: userTail says how it went
 				}
 			}
-			if ok && r.st.SendOutcome(d.ID) == state.SendArrived {
-				// Its terminal's later word: it arrived in the agent it was
-				// typed into (the conversation says so too).
+			if ok && (d.OK || r.st.SendOutcome(d.ID) == state.SendArrived) {
+				// The late arrival itself, or the word in doubt before it:
+				// the send arrived in the agent it was typed into (the
+				// conversation says so too).
 				if late == "" {
 					late = who // the newest such
 				}
@@ -502,7 +517,7 @@ func (r *Runtime) attentionTail(fallback string) string {
 		}
 	}
 	if late != "" {
-		return "The message to " + late + " that could not be confirmed did arrive in the agent it was typed into. If that agent was stopped, started again or replaced since, look at relay_screen to see whether an agent running now is acting on it before sending it again."
+		return "The message to " + late + " that could not be confirmed " + arrivedLate
 	}
 	return fallback + " needs attention; see above."
 }

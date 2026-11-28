@@ -137,8 +137,11 @@ type State struct {
 	sendOutcomes map[string]SendOutcome
 	// lateArrivals are the relay.delivered events, by seq, that say a send
 	// arrived after an earlier one had said it did not: the conversation
-	// says so (relayNotice), since it was told the earlier word.
+	// says so (relayNotice) and eagent is owed a look (NeedsAttention),
+	// since it was told the earlier word. lateSends are the sends whose
+	// newest word is such an arrival (ArrivedLate).
 	lateArrivals map[int64]bool
+	lateSends    map[string]bool
 
 	// lastMoveSeq is the newest thing an agent did that the user might be
 	// asked about: a finished turn, a dialog it is stuck on, an exit.

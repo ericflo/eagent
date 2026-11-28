@@ -143,6 +143,7 @@ func (s *State) noteSend(d event.RelaySendData) {
 		s.sendOutcomes = map[string]SendOutcome{}
 	}
 	s.sendOutcomes[d.ID] = SendWaiting
+	delete(s.lateSends, d.ID)
 	if d.Mode == "after_turn" {
 		s.sendOutcomes[d.ID] = SendHeld
 	}
@@ -199,8 +200,9 @@ func (s *State) NextRelaySendID() string {
 
 // NeedsAttention reports whether a relay event is one eagent must look at
 // now rather than at its next progress look: a finished turn, a usage limit,
-// a dialog the agent is stuck on, an exit, a message that did not arrive.
-func NeedsAttention(ev event.Event) bool {
+// a dialog the agent is stuck on, an exit, a message that did not arrive,
+// and one that arrived after eagent was told it had not (lateArrivals).
+func (s *State) NeedsAttention(ev event.Event) bool {
 	switch ev.Type {
 	case event.RelayTurn, event.RelayLimit:
 		return true
@@ -209,10 +211,15 @@ func NeedsAttention(ev event.Event) bool {
 		return ev.Decode(&d) == nil && (d.State == "blocked" || d.State == "exited")
 	case event.RelayDelivered:
 		var d event.RelayDeliveredData
-		return ev.Decode(&d) == nil && !d.OK
+		return ev.Decode(&d) == nil && !d.OK || s.lateArrivals[ev.Seq]
 	}
 	return false
 }
+
+// ArrivedLate says the send's newest word is an arrival that came after
+// the record had said it did not arrive: it arrived in the agent it was
+// typed into, which a stop, restart or switch may have replaced since.
+func (s *State) ArrivedLate(id string) bool { return s.lateSends[id] }
 
 func (s *State) applyRelay(ev event.Event) {
 	if s.Relays == nil {
@@ -312,11 +319,12 @@ func (s *State) applyRelay(ev event.Event) {
 		if was, known := s.sendOutcomes[d.ID]; known {
 			// The newest word on a send is how it ended: a late
 			// confirmation after one that gave up means it arrived.
+			delete(s.lateSends, d.ID)
 			if d.OK && (was == SendUnconfirmed || was == SendNotSent) {
 				if s.lateArrivals == nil {
-					s.lateArrivals = map[int64]bool{}
+					s.lateArrivals, s.lateSends = map[int64]bool{}, map[string]bool{}
 				}
-				s.lateArrivals[ev.Seq] = true
+				s.lateArrivals[ev.Seq], s.lateSends[d.ID] = true, true
 			}
 			s.sendOutcomes[d.ID] = DeliveryOutcome(d)
 		}

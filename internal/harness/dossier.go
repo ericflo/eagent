@@ -724,7 +724,7 @@ func (r *Runtime) recordedSinceOpening(through int64) bool {
 		return false
 	}
 	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > covers; i-- {
-		if r.st.Events[i].Seq <= through && shows(r.st.Events[i]) {
+		if r.st.Events[i].Seq <= through && shows(r.st, r.st.Events[i]) {
 			return true
 		}
 	}

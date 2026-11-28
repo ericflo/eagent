@@ -67,9 +67,9 @@ type relaySeats struct {
 	// order they were accepted (enqueueSend).
 	queues map[relaySeat]*sendQueue
 	// carried are the user's sends that a switch's brief quoted whole, as
-	// messages with no outcome, while each was still being typed into the
-	// agent the switch replaced (briefOf, briefCarries).
-	carried map[string]bool
+	// messages with no outcome (briefOf), each with the id of that brief's
+	// own send (leftToBrief).
+	carried map[string]string
 	// stopping are the terminals relay_control stop is closing, by relay
 	// name, each closed when it is gone. Both share a terminal name, so a
 	// start under that name waits for it rather than racing the kill.
@@ -499,10 +499,9 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 		r.relays.mu.Lock()
 		gone, goneRel := q.gone, q.goneRel
 		q.typing, q.gone, q.goneRel = "", "", nil
-		carried := r.relays.carried[h.id]
 		r.relays.mu.Unlock()
 		switch {
-		case carried:
+		case r.leftToBrief(h.id) != "":
 			// The switch that took this seat went on without this send's
 			// typing (its bound, oldSendSettle), and its brief quoted the
 			// message whole for the new agent: it is left to the brief, as
@@ -524,7 +523,7 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 	})
 	if !ran && untyped {
 		r.relays.mu.Lock()
-		if !r.relays.carried[h.id] {
+		if r.relays.carried[h.id] == "" {
 			q.items = append([]heldSend{h}, q.items...)
 		}
 		r.relays.mu.Unlock()
@@ -534,15 +533,22 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 	}
 }
 
-// briefCarries reports whether a switch's brief quoted the send whole, as
-// a message of the user's with no outcome, while it was still being typed
-// into the agent the switch replaced (its typing outlasted the wait on
-// oldIdle): it is left to the brief, as the user's other messages to that
-// agent are, and nothing records how that typing ended.
-func (r *Runtime) briefCarries(id string) bool {
+// leftToBrief names the hand-over brief ("" for none) that a send of the
+// user's is left to: a switch's brief quoted it whole for the agent that
+// took over, as a message with no outcome, and the record does not say
+// that brief did not go. What the replaced agent's terminal says went
+// wrong with such a send afterwards is not the message's outcome: the
+// brief is its way to the new agent, and a failure recorded for it would
+// have it sent a second time. Once the brief is known not to have gone,
+// the send is like any other. Loop goroutine.
+func (r *Runtime) leftToBrief(id string) string {
 	r.relays.mu.Lock()
-	defer r.relays.mu.Unlock()
-	return r.relays.carried[id]
+	brief := r.relays.carried[id]
+	r.relays.mu.Unlock()
+	if brief != "" && r.st.SendOutcome(brief) == state.SendNotSent {
+		return ""
+	}
+	return brief
 }
 
 // hasOutcome reports whether the record says how a send ended.
@@ -837,6 +843,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		r.syncRelaySettings()
 		return "", err
 	}
+	var carried map[string]bool // the user's sends the brief quotes whole
 	if job.handover != nil {
 		// Written now, with what waited for this start in hand. A brief
 		// still waiting for the agent this switch replaced never reached
@@ -857,16 +864,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 			}
 		}
 		job.handover = ho
-		brief, carried := r.briefOf(ho, pending)
-		job.brief = brief
-		r.relays.mu.Lock()
-		if r.relays.carried == nil {
-			r.relays.carried = map[string]bool{}
-		}
-		for id := range carried {
-			r.relays.carried[id] = true
-		}
-		r.relays.mu.Unlock()
+		job.brief, carried = r.briefOf(ho, pending)
 	}
 	if rel := r.st.Relays[job.replaces]; job.endOld != "" && rel != nil && rel.Active() {
 		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld}))
@@ -900,6 +898,14 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if job.brief != "" {
 		id := r.st.NextRelaySendID()
 		job.briefID = id
+		r.relays.mu.Lock()
+		if r.relays.carried == nil {
+			r.relays.carried = map[string]string{}
+		}
+		for c := range carried {
+			r.relays.carried[c] = id
+		}
+		r.relays.mu.Unlock()
 		r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: job.name, ID: id, From: "eagent", Mode: "queue", Text: job.brief, Auto: job.briefAuto}))
 		queue = append(queue, heldSend{id: id, text: job.brief, mode: "queue", done: job.briefDone, on: job.name, brief: true, handover: job.handover})
 	}
@@ -1102,7 +1108,9 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 			r.post(func() {
 				if r.relays.get(name) == seat {
 					r.onRelayEvent(name, ev)
-				} else if ev.Kind == relay.KindDelivered && !r.sameWord(ev) {
+				} else if ev.Kind == relay.KindDelivered && !r.sameWord(ev) && (ev.OK || r.leftToBrief(ev.SendID) == "") {
+					// A seat taken out of use: how its sends went is still
+					// recorded, but not a failure on one left to a brief.
 					r.append(r.outcomeAside(sendHolder(r.st, ev.SendID, name), ev))
 				}
 			})
@@ -1906,12 +1914,14 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 			// or finish for one never typed), and that decides.
 			return fmt.Sprintf("The session ended before %s's send (%s) was confirmed; its outcome is recorded on its own.", rel.Who(), id), false
 		}
-		if r.briefCarries(id) {
+		brief := ""
+		r.sync(func() { brief = r.leftToBrief(id) })
+		if brief != "" {
 			// A switch went on without this typing, and its brief quotes
 			// the message whole for the agent that took over: how the
 			// typing into the old agent ended is not the message's outcome
 			// (settleSend), and the model is not told it did not go.
-			return fmt.Sprintf("%s was replaced while the message (%s) was being typed into it. The brief to the agent that took over quotes the message whole, so it is not to be sent again.", rel.Who(), id), false
+			return fmt.Sprintf("%s was replaced while the message (%s) was being typed into it. The hand-over brief (%s) to the agent that took over quotes the message whole, so it is not to be sent again unless that brief did not go.", rel.Who(), id, brief), false
 		}
 		if err != nil {
 			r.sync(func() {
@@ -2737,10 +2747,10 @@ func forwardedAs(st *state.State, relayName string, seq int64, atts string) (id,
 
 // wentToEarlierHolder says whether every send in ids (all under name) that
 // may have gone, and there is at least one, was put to name last before
-// the relay.end that stopped the agent which held name before (and, if it
-// arrived, arrived before then), and the agent holding name now started
-// after that end and runs. Such a send was that agent's, whether it
-// arrived, waits or was never confirmed: the agent now was never sent it.
+// the relay.end that stopped the agent which held name before, and the
+// agent holding name now started after that end and runs. Such a send was
+// that agent's, whether it arrived (however late its terminal said so),
+// waits or was never confirmed: the agent now was never sent it.
 // Only the words of a refusal hang on it: which sends count stays as
 // forwardedAs counts them.
 func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map[string]string) bool {
@@ -2749,7 +2759,7 @@ func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map
 		return false
 	}
 	var endSeq int64
-	sentAt, arrivedAt := map[string]int64{}, map[string]int64{}
+	sentAt := map[string]int64{}
 	for _, ev := range st.Events {
 		switch ev.Type {
 		case event.RelayEnd:
@@ -2764,13 +2774,6 @@ func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map
 			if ev.Decode(&d) == nil && d.Name == name {
 				sentAt[d.ID] = ev.Seq
 			}
-		case event.RelayDelivered:
-			var d event.RelayDeliveredData
-			if ev.Seq < rel.StartSeq && ev.Decode(&d) == nil && d.OK {
-				if _, seen := arrivedAt[d.ID]; !seen {
-					arrivedAt[d.ID] = ev.Seq
-				}
-			}
 		}
 	}
 	if endSeq == 0 {
@@ -2778,16 +2781,13 @@ func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map
 	}
 	matched := false
 	for _, id := range ids {
-		o := st.SendOutcome(id)
-		if o == state.SendNotSent {
+		if st.SendOutcome(id) == state.SendNotSent {
 			continue // it certainly did not go: it says nothing of where the message went
 		}
 		if _, moved := movedOn[id]; moved {
 			return false
 		}
-		s, sent := sentAt[id]
-		a, arrived := arrivedAt[id]
-		if !sent || s > endSeq || o == state.SendArrived && (!arrived || a > endSeq) {
+		if s, sent := sentAt[id]; !sent || s > endSeq {
 			return false
 		}
 		matched = true

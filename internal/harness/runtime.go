@@ -615,7 +615,7 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 		}
 		var ae *llm.APIError
 		if !errors.As(err, &ae) || !ae.Unroutable() {
-			return nil, err
+			return nil, callErr{err, client.Endpoint}
 		}
 		// The route answered that it cannot serve the model: the next one
 		// of the chain, each tried once. The last one failing ends the call.
@@ -632,9 +632,30 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 			}
 		})
 		if !switched {
-			return nil, err
+			return nil, callErr{err, client.Endpoint}
 		}
 	}
+}
+
+// callErr is a model call's failure with the route the call was made on,
+// which need not be the one its actor's calls are on by the time the
+// failure is read (onRouteInUse).
+type callErr struct {
+	error
+	on llm.Endpoint
+}
+
+func (e callErr) Unwrap() error { return e.error }
+
+// onRouteInUse says a failed call of eagent's was made on the route its
+// calls are on now: one made before a pick in the settings moved them (it
+// was still out then) was not, and its failure says nothing of the model
+// in use. A fallback taken within the call is the route in use, and its
+// failure is its own. Loop goroutine.
+func (r *Runtime) onRouteInUse(err error) bool {
+	var ce callErr
+	m := r.models[event.ActorEagent]
+	return !errors.As(err, &ce) || (m != nil && m.client != nil && sameRoute(m.client.Endpoint, ce.on))
 }
 
 // takeRoute moves who's calls to the at-th route of its chain through

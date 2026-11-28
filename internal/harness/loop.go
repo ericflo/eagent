@@ -204,7 +204,7 @@ func (t *turnState) init(st *state.State) {
 			t.saidAt, t.saidSeq = ev.Time, ev.Seq
 			t.spokeSeen = spokeSeenOnReplay(t.seen, ev.Seq)
 		}
-		if shows(ev) {
+		if shows(st, ev) {
 			t.worthy = ev.Seq
 		}
 	}
@@ -276,7 +276,7 @@ func (t *turnState) init(st *state.State) {
 	// stopped is still owed one.
 	for _, ev := range st.Events {
 		if ev.Seq > t.seen {
-			if k, ok := wakeFor(ev); ok {
+			if k, ok := wakeFor(st, ev); ok {
 				t.wakes[k] = ev.Seq
 			}
 		}
@@ -284,14 +284,14 @@ func (t *turnState) init(st *state.State) {
 }
 
 // wakeFor says whether an event asks for a look, and how pressingly.
-func wakeFor(ev event.Event) (wakeKind, bool) {
+func wakeFor(st *state.State, ev event.Event) (wakeKind, bool) {
 	switch ev.Type {
 	case event.UserMessage, event.UserAnswer:
 		return wakeUser, true
 	case event.RelayTurn:
 		return wakeTurnEnd, true
 	case event.RelayState, event.RelayDelivered, event.RelayLimit:
-		if state.NeedsAttention(ev) {
+		if st.NeedsAttention(ev) {
 			return wakeAttention, true
 		}
 	case event.HarnessMessage:
@@ -322,14 +322,14 @@ func wakeFor(ev event.Event) (wakeKind, bool) {
 
 // shows reports an event that adds a line to eagent's conversation and is
 // not eagent's own doing: what a progress look would have to weigh.
-func shows(ev event.Event) bool {
+func shows(st *state.State, ev event.Event) bool {
 	switch ev.Type {
 	case event.UserMessage, event.UserAnswer, event.RelayStart, event.RelayProgress, event.RelayTurn, event.RelayEnd:
 		return true
 	case event.ScheduleFire:
 		return ev.Actor == event.ActorHarness
 	case event.RelayState, event.RelayDelivered, event.RelayLimit:
-		return state.NeedsAttention(ev)
+		return st.NeedsAttention(ev)
 	}
 	return false
 }
@@ -344,10 +344,10 @@ var wakeSettle = 400 * time.Millisecond
 // append).
 func (r *Runtime) noteWake(ev event.Event) {
 	t := &r.turns
-	if shows(ev) {
+	if shows(r.st, ev) {
 		t.worthy = ev.Seq
 	}
-	k, ok := wakeFor(ev)
+	k, ok := wakeFor(r.st, ev)
 	if !ok {
 		return
 	}
@@ -1350,16 +1350,20 @@ var (
 // goroutine.
 func (r *Runtime) turnFailed(err error, shown int64, answered bool, w wake) endPlan {
 	t := &r.turns
-	if shown < r.st.Moved() {
-		// The call was shown the record as it was before eagent's calls
-		// moved to another model (a pick in the settings or a fallback
-		// while it was out). Like a reply still out then (state OnRoute),
-		// its failure says nothing of the model in use, which starts
-		// clean (newModel): nothing is counted, no restart is asked for,
-		// and the look, still owed, is made again at the loop's next
-		// step, shown the record with the move in it.
+	if !r.onRouteInUse(err) {
+		// The call was made on a model eagent's calls have since moved
+		// off (a pick in the settings while it was out). Like a reply
+		// still out then (state OnRoute), its failure says nothing of the
+		// model in use, which starts clean (newModel): nothing is
+		// counted, no restart is asked for, and the look, still owed, is
+		// made again at the loop's next step, shown the record with the
+		// move in it. That holds for a closing turn too: its word is
+		// asked for again, of the model in use.
 		r.ui.Log("eagent: a call made before the model changed failed (%s); it is not counted against the model in use", shortErr(err))
-		return r.sessionPlan(w, true)
+		if p := r.sessionPlan(w, true); !w.final || !p.ends {
+			return p
+		}
+		return endPlan{waits: true}
 	}
 	var ae *llm.APIError
 	if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 && !ae.Retryable() && r.stillClosing() {
