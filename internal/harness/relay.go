@@ -211,12 +211,11 @@ type relayLaunch struct {
 	// handover, for a switch, is what the handoff brief is written from;
 	// brief is that brief, written when the agent is up (finishLaunch) and
 	// typed into it before anything that waited for it. briefAuto marks its
-	// send as the harness's own. briefDone hears how typing it went, and
-	// drained when what waited during the launch has been typed too.
-	handover           *handover
-	brief, briefID     string
-	briefAuto          bool
-	briefDone, drained chan sendResult
+	// send as the harness's own. briefDone hears how typing it went.
+	handover       *handover
+	brief, briefID string
+	briefAuto      bool
+	briefDone      chan sendResult
 	// wasActive: the relay it replaces was running when this began (a
 	// restart can also bring back one that was stopped). stopped is why
 	// the relay was stopped while this ran (relay_control stop, Stop
@@ -233,12 +232,10 @@ type relayLaunch struct {
 // heldSend is a send that waits its turn to be typed: for a relay to
 // finish starting, or in a seat's queue. done, when set, hears how typing
 // it went, and whoever waits on it records a failure; otherwise a failure is
-// recorded here as undelivered. A barrier types nothing: it tells done that
-// everything queued before it has been typed.
+// recorded here as undelivered.
 type heldSend struct {
 	id, text, mode string
 	done           chan sendResult
-	barrier        bool
 	// on is the relay the send is on the record for, when it waits in a
 	// start that may hand it to another (a switch).
 	on string
@@ -424,7 +421,6 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 		r.relays.mu.Unlock()
 		var res sendResult
 		switch {
-		case h.barrier:
 		case !current:
 			res.err = errSeatGone
 		default:
@@ -506,7 +502,6 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 		carried := r.relays.carried[h.id]
 		r.relays.mu.Unlock()
 		switch {
-		case h.barrier:
 		case carried:
 			// The switch that took this seat went on without this send's
 			// typing (its bound, oldSendSettle), and its brief quoted the
@@ -837,9 +832,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 				// Recorded here, as its waiter may never get the loop again
 				// (the session's end): one outcome, as it would record.
 				failed := fmt.Errorf("the agent could not start again: %w", err)
-				if !h.barrier {
-					r.typingFailed(sendHolder(r.st, h.id, firstNonEmpty(h.on, job.replaces)), h.id, failed)
-				}
+				r.typingFailed(sendHolder(r.st, h.id, firstNonEmpty(h.on, job.replaces)), h.id, failed)
 				h.done <- sendResult{err: failed}
 				continue
 			}
@@ -863,7 +856,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 				if rel := r.st.Relays[job.replaces]; rel != nil {
 					ho = h.handover.through(rel, false)
 				}
-			case !h.barrier:
+			default:
 				pending[h.id] = true
 			}
 		}
@@ -942,7 +935,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 			h.done <- sendResult{err: failed}
 			continue
 		}
-		if h.on != "" && h.on != job.name && !h.barrier {
+		if h.on != "" && h.on != job.name {
 			// A send on the record for the relay this one took over from
 			// is the new agent's from now on: who sent it last, what the
 			// user sent it and its arrival are the new relay's.
@@ -951,15 +944,10 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 				r.append(event.New(event.RelayMoved, event.ActorHarness, event.RelayMovedData{RelaySendData: d, Prev: h.on}))
 			}
 		}
-		if !h.barrier {
-			// It is this relay's on the record now: a later restart or
-			// switch moves it on from here, not from where it began.
-			h.on = job.name
-		}
+		// It is this relay's on the record now: a later restart or
+		// switch moves it on from here, not from where it began.
+		h.on = job.name
 		queue = append(queue, h)
-	}
-	if job.drained != nil {
-		queue = append(queue, heldSend{barrier: true, done: job.drained})
 	}
 	r.enqueueSend(job.name, job.seat, queue...)
 	return job.name, nil
@@ -2041,7 +2029,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 			if profile == "" {
 				return "switch: say which profile to hand over to (" + strings.Join(r.cfg.Relay.RelayProfileNames(), ", ") + ")", true
 			}
-			briefDone, drained := make(chan sendResult, 1), make(chan sendResult, 1)
+			briefDone := make(chan sendResult, 1)
 			var sw *relayLaunch
 			// The old agent is stopped and the new one launched off the loop
 			// goroutine; the old one ends on the record just before the new
@@ -2064,7 +2052,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 					return nil, fmt.Errorf("%s is starting again; wait for it", cur.Who())
 				}
 				job.endOld = "handed over to " + profile
-				job.handover, job.briefAuto, job.briefDone, job.drained = r.handoverFor(cur), auto, briefDone, drained
+				job.handover, job.briefAuto, job.briefDone = r.handoverFor(cur), auto, briefDone
 				r.beginLaunch(job, cur.Name)
 				sw = job
 				return job, nil
@@ -2075,7 +2063,6 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 			// The brief is typed first, then what the user sent during the
 			// handover (finishLaunch queued both, in that order).
 			berr := r.awaitSend(briefDone).err
-			r.awaitSend(drained)
 			if errors.Is(berr, errEnding) {
 				// Given up for the session's end, not failed: the brief's
 				// own outcome, recorded where its typing ends, decides.

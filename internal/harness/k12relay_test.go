@@ -77,40 +77,6 @@ func TestK12ASwitchTheSessionEndedOnSaysSo(t *testing.T) {
 	}
 }
 
-// The ninth review: the user quits while a turn's relay_send waits for its
-// send to be typed (seat.Send waits for the agent's prompt, up to 40 s);
-// the drain's grace runs out. Its log said "a model call did not stop in
-// time"; it says what the turn waited on: the send being typed.
-func TestK12ADrainSaysItWaitedOnASendBeingTyped(t *testing.T) {
-	saved := turnStopGrace
-	turnStopGrace = 20 * time.Millisecond
-	t.Cleanup(func() { turnStopGrace = saved })
-	seat := &heldSendSeat{fakeSeat: newFakeSeat("one"), entered: make(chan string, 4), result: make(chan error, 4)}
-	rt, _, done := r10Session(t, seat)
-	rt.wg.Add(1)
-	go func() {
-		defer rt.wg.Done()
-		_, _ = rt.relayTool("relay_send", argStr(map[string]any{"text": "run the tests"}), argNum(nil), argList(nil), false)
-	}()
-	id := <-seat.entered
-	rt.sync(func() { rt.beginShutdown("quit", 0) })
-	select {
-	case <-rt.closed: // past the grace
-	case <-time.After(5 * time.Second):
-		t.Fatal("the loop never closed")
-	}
-	seat.result <- nil // the typing ends (seat.Send is bounded: 40 s)
-	select {
-	case <-done:
-	case <-time.After(20 * time.Second):
-		t.Fatal("the session did not end")
-	}
-	logged := strings.Join(rt.ui.(*fakeUI).logged(), "\n")
-	if strings.Contains(logged, "a model call did not stop in time") || !strings.Contains(logged, "being typed into Codex ("+id+")") {
-		t.Errorf("the drain's log: %q; want that the turn waited on the send %s being typed into Codex", logged, id)
-	}
-}
-
 // The relay reviewer's ninth-pass tests (sr9_relay_test.go), copied.
 
 func sr9Wait(t *testing.T, ch <-chan int, what string) {

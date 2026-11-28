@@ -17,7 +17,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1150,30 +1149,6 @@ func (r *Runtime) beginShutdown(reason string, code int) {
 // closing report gets finalReportGrace). A variable so tests can shorten it.
 var turnStopGrace = 5 * time.Second
 
-// turnHeldBy says, for the log, what had not finished when the grace of
-// the turn finish waited on ran out: a send still being typed into an
-// agent (a tool of the turn may wait for the typing, which waits for the
-// agent's prompt), else a model call.
-func (r *Runtime) turnHeldBy() string {
-	r.relays.mu.Lock()
-	var typing []string
-	for _, q := range r.relays.queues {
-		if q.typing != "" {
-			who := q.name
-			if rel := r.st.Relays[q.name]; rel != nil {
-				who = rel.Who()
-			}
-			typing = append(typing, fmt.Sprintf("%s (%s)", who, q.typing))
-		}
-	}
-	r.relays.mu.Unlock()
-	if len(typing) > 0 {
-		sort.Strings(typing)
-		return "the turn did not stop in time; a send is still being typed into " + strings.Join(typing, ", ")
-	}
-	return "a model call did not stop in time"
-}
-
 // finish runs after the loop exits: waits for the turn in flight, records
 // session.end, closes the store.
 func (r *Runtime) finish() {
@@ -1196,7 +1171,7 @@ drain:
 		case <-waitDone:
 			break drain
 		case <-deadline.C:
-			r.ui.Log("%s", r.turnHeldBy())
+			r.ui.Log("the turn did not stop in time")
 			break drain
 		}
 	}
@@ -1274,7 +1249,7 @@ queued:
 	r.relays.mu.Lock()
 	for _, job := range r.relays.launching {
 		for _, h := range job.held {
-			untyped[h.id] = !h.barrier
+			untyped[h.id] = true
 		}
 		for _, id := range job.takenBack { // a start not recorded (late)
 			untyped[id] = true
@@ -1282,7 +1257,7 @@ queued:
 	}
 	for _, q := range r.relays.queues {
 		for _, h := range q.items {
-			untyped[h.id] = !h.barrier
+			untyped[h.id] = true
 		}
 	}
 	r.relays.mu.Unlock()
