@@ -64,9 +64,18 @@ func TestAQuitLeftInTheInboxDoesNotEndTheNextRun(t *testing.T) {
 					t.Fatal(err)
 				}
 				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
 				done := make(chan int, 1)
-				go func() { done <- rt2.Run(ctx) }()
+				ended := make(chan struct{})
+				go func() { done <- rt2.Run(ctx); close(ended) }()
+				t.Cleanup(func() {
+					// The run has ended before its folder is taken away.
+					cancel()
+					select {
+					case <-ended:
+					case <-time.After(10 * time.Second):
+						t.Error("the resumed run did not end")
+					}
+				})
 				waitFor(t, "the answer to the user's message, or the run's end", func() bool {
 					return strings.Contains(strings.Join(ui.said(), "\n"), "Looking at the login bug") || len(done) > 0
 				})
