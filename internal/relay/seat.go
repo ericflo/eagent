@@ -651,6 +651,14 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		return "", errors.New("the agent is not running")
 	}
 	state, err := s.waitReady(readyWait)
+	if mode == "interrupt" && isAgentCommand(text) && (err == nil && state == "working" || errors.Is(err, errUnknownScreen)) && s.queueHasWords() {
+		// The interrupt's Escape puts what the agent's own queue holds back
+		// into its input box (Claude's popAll): the command would be typed
+		// after those words and sent as the end of that message, and no
+		// command would run, though typed is delivered for a command.
+		label := s.agent.Label()
+		return "", fmt.Errorf("%s was not sent: %s's own queue holds a message, which the interrupt would put back into its input box; the command would be typed after it and sent as part of that message, not run. Send it once %s has read the queued message", strings.Fields(text)[0], label, label)
+	}
 	if errors.Is(err, errUnknownScreen) && mode == "interrupt" {
 		// Quiet for ten minutes on a screen the seat does not know: the
 		// interrupt itself goes (it is how a stuck agent is got back), its
@@ -1204,6 +1212,16 @@ func (s *Seat) requeuedLeft() []Event {
 		return p.requeued
 	})
 	return last
+}
+
+// queueHasWords says whether an interrupt would leave words in the agent's
+// input box: its own queue holds a message, as the transcript last said
+// (of a send, inQueue; of anything typed there, queueHolds), or one the
+// queue gave up already sits in the box (requeued).
+func (s *Seat) queueHasWords() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.queueHolds || len(s.inQueue) > 0 || slices.ContainsFunc(s.pending, func(p *pending) bool { return p.requeued })
 }
 
 // noteQueued keeps the sends that arrived as the agent's queued message n.
@@ -1776,9 +1794,10 @@ func (s *Seat) settle(screen string) string {
 }
 
 // atWork is the one judgement of whether the agent's own evidence says it
-// is at work (atRest, Status.Stuck): pi's status file says it works;
-// Claude's spinner line, Codex's working line, or Antigravity's status
-// line naming a state other than idle is on its screen.
+// is at work (atRest, Status.Stuck): pi's status file says it works; the
+// foot of its screen shows Claude's interrupt hint or spinner line, Codex's
+// working line, or Antigravity's status line naming a state other than
+// idle (each agent's busy).
 func (s *Seat) atWork(screen string) bool {
 	if wr, ok := s.agent.(workReporter); ok && wr.reportedWorking(s) {
 		return true
