@@ -195,7 +195,7 @@ eagent used to run an orchestrator, task workers and a narrator. The one loop do
 | Calls on one wake | A reminder at 30, no stop | Stops at `max_calls_per_turn` (30) | One loop with no reviewer above it needs a stop. The stopped turn says so to the user when the agent is still stuck. |
 | When the conversation restarts | Just before the orchestrator's next call | At the first quiet moment past the limit | The prompt is still cached then, and the next message does not wait. |
 | While the dossier is written | The narrator kept talking | eagent says nothing else for the pass (at most 23 minutes) | One model. Messages still reach the agent and its reports still show. |
-| When the model is unreachable | The narrator, on its own route, could still talk | The harness tells the user itself; a `fallback` route covers an outage | One model. |
+| When the model is unreachable | The narrator, on its own route, could still talk | The harness tells the user itself and waits for the network; a `fallback` route covers a primary that cannot serve the model (bad key, no access, no credits) | One model. |
 | "The work is done" buzzing the phone | Automatic once the orchestrator said done | The model marks the message important; the tail asks it to | `yield` is gone, so the harness no longer knows "done". `/notify-done` still forces it. |
 
 **Changed numbers:**

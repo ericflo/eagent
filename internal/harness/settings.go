@@ -321,7 +321,7 @@ func (r *Runtime) swapRoute(sw routeSwap) {
 	}
 	r.models[sw.who] = &modelRoute{routes: sw.eps, client: r.newClient(sw.eps[0], sw.who), conf: sw.conf}
 	if !moved {
-		r.models[sw.who].out = old.out // the same model at the same address: an outage goes on
+		r.models[sw.who].told = old.told // the same model at the same address: an outage goes on
 	}
 	if sw.who == event.ActorEagent && moved {
 		// The new one starts clean (newModel) and is tried at the loop's
