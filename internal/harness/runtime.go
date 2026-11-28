@@ -1313,12 +1313,17 @@ queued:
 	// agent that was stopped or had exited meanwhile (settleExited left it
 	// to its typing's end): nothing will confirm it, and that is recorded
 	// now, as the loop would have. One a switch's brief carries stays the
-	// brief's. (Typed into an agent that runs, restarted or not, it waits
-	// for the seat a resume attaches.)
+	// brief's. (Where the agent runs, as the record has its name now, a
+	// restart since included, the send waits for the seat a resume
+	// attaches, and nothing is written here for an agent whose transcript
+	// is no longer being read.)
 	r.relays.mu.Lock()
 	var typed []*sendQueue
 	for _, q := range r.relays.queues {
-		if q.typing != "" && q.gone != "" && (q.goneRel.Ended || q.goneRel.State == "exited") {
+		if q.typing == "" || q.gone == "" {
+			continue
+		}
+		if rel := r.st.Relays[q.goneRel.Name]; rel != nil && (rel.Ended || rel.State == "exited") {
 			typed = append(typed, q)
 		}
 	}

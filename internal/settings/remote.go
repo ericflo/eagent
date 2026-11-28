@@ -958,21 +958,22 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 }
 
 // needsPreset reports whether a project file's values make the summarizer
-// dedicated and write only part of a route for it. The loader takes a
+// dedicated and write only part of a route for it: one with no protocol,
+// address or model, where no variable gives it either. The loader takes a
 // route as written, so that file loads only under a saved preset that
 // gives the rest.
 func needsPreset(values map[string]any) bool {
 	mode, _ := pointerValue(values, "/summarizer/mode")
 	own, _ := pointerValue(values, "/summarizer/model")
-	if has, _ := own.(map[string]any); mode != config.SummarizerDedicated || len(has) == 0 {
+	has, _ := own.(map[string]any)
+	if mode != config.SummarizerDedicated || len(has) == 0 {
 		return false
 	}
-	var route config.ModelRoute
-	raw, _ := json.Marshal(own)
-	_ = json.Unmarshal(raw, &route)
-	alone := config.Config{Summarizer: config.Summarizer{Mode: config.SummarizerDedicated, Model: &route}}
-	return slices.ContainsFunc(alone.Problems(), func(p config.Problem) bool {
-		return p.Severity == "error" && strings.HasPrefix(p.Path, "/summarizer/model")
+	env := config.EnvOverrides()
+	return slices.ContainsFunc([]string{"protocol", "base_url", "model"}, func(leaf string) bool {
+		v, _ := has[leaf].(string)
+		_, given := env["/summarizer/model/"+leaf]
+		return v == "" && !given
 	})
 }
 

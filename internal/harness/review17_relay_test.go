@@ -139,6 +139,79 @@ func TestAMessageBeingTypedAsTheSessionIsStoppedHasAnOutcome(t *testing.T) {
 	}
 }
 
+// The agent exits while a message is being typed into it and is started
+// again, and the user quits, which leaves the agent running, before that
+// typing has ended. The session's end writes nothing under the name of an
+// agent that runs: its transcript is no longer being read, and a record
+// dated then would have a resume take what the agent wrote meanwhile as
+// read. The message waits for the seat the resume attaches, as it did.
+func TestTheSessionsEndWritesNothingForAnAgentRestartedSinceATyping(t *testing.T) {
+	setFor(t, &oldSendSettle, 50*time.Millisecond)
+	seat := &r17HeldSeat{fakeSeat: newFakeSeat("one"), entered: make(chan string, 1), release: make(chan struct{})}
+	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	relayAgentHomes(t)
+	rt, err := New(testConfig("http://127.0.0.1:1"), Options{Project: t.TempDir(), Relay: "claude", Interactive: true}, &fakeUI{input: make(chan string, 16)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	done := make(chan int, 1)
+	go func() { done <- rt.Run(ctx) }()
+	rt.sync(func() {
+		rt.st.Relays["claude"].State = "working"
+		d := event.UserMessageData{Text: "then run the linter", Delivery: "queue"}
+		ev := rt.append(event.New(event.UserMessage, event.ActorUser, d))
+		if rel, _ := rt.routeUserMessage(d); rel != nil {
+			rt.forwardUserMessage(rel, ev.Seq, d)
+		}
+	})
+	var id string
+	select {
+	case id = <-seat.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the message was never being typed")
+	}
+	agent := func(what string, cond func(*state.Relay) bool) {
+		t.Helper()
+		waitFor(t, what, func() (ok bool) {
+			rt.sync(func() { ok = cond(rt.st.Relays["claude"]) })
+			return ok
+		})
+	}
+	seat.emit(relay.Event{Kind: relay.KindState, State: "exited", Detail: "$ "})
+	agent("the exit recorded", func(rel *state.Relay) bool { return rel.State == "exited" })
+	g.release <- struct{}{}
+	recv(t, relayToolAsync(rt, map[string]any{"action": "restart"}), "restart")
+	agent("the agent started again", func(rel *state.Relay) bool { return !rel.Ended && rel.State != "exited" })
+	rt.sync(func() { rt.beginShutdown("quit", 0) })
+	// The typing ends once the loop takes nothing more.
+	waitFor(t, "the loop's end", func() bool { return !rt.enqueue(func() {}) })
+	closed := time.Now()
+	close(seat.release)
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the session did not end")
+	}
+	evs, err := store.Read(rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := state.Replay(evs)
+	rel := st.Relays["claude"]
+	if rel == nil || rel.Ended || rel.State == "exited" {
+		t.Fatalf("setup: the agent does not run at the session's end: %+v", rel)
+	}
+	if rel.LastEventAt.After(closed) {
+		t.Errorf("the agent's last news is dated %v after the loop closed", rel.LastEventAt.Sub(closed))
+	}
+	if o := st.SendOutcome(id); o != state.SendWaiting {
+		t.Errorf("the record says of the message: %q", o)
+	}
+}
+
 // Finding 4. The user's message was typed into Codex and not yet seen
 // arriving when eagent switched to Claude: the brief quoted it whole, the
 // brief arrived, and Claude finished a turn on it. eagent then switches to

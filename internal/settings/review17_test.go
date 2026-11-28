@@ -444,6 +444,21 @@ func TestMakingTheSummarizerDedicatedWritesNoRouteOfItsOwn(t *testing.T) {
 			}
 		})
 	}
+	// The file keeps a model for a summarizer that calls nothing, and
+	// variables give that model's address, protocol and key: made
+	// dedicated, the route is whole with no saved preset at all. (A second
+	// read found this refused, as a file that would need a saved preset.)
+	t.Run("variables give the rest of the route", func(t *testing.T) {
+		project, err := r17Apply(t, r17Case{file: `{"summarizer":{"model":{"model":"zai-org/GLM-5.3-Flash"}}}`, edits: []control.Edit{dedicated},
+			env: map[string]string{"EAGENT_SUMMARIZER_BASE_URL": "https://api.together.xyz/v1", "EAGENT_SUMMARIZER_PROTOCOL": "openai-chat", "EAGENT_SUMMARIZER_API_KEY_ENV": "TOGETHER_API_KEY"}})
+		if err != nil {
+			t.Fatalf("refused: %v", err)
+		}
+		cfg, err := config.Load(project, "")
+		if got := cfg.Summarizer.Route(cfg.Model); err != nil || cfg.Summarizer.Mode != config.SummarizerDedicated || got.Model != "zai-org/GLM-5.3-Flash" || got.BaseURL != "https://api.together.xyz/v1" {
+			t.Fatalf("the summarizer is %s and calls %s @ %s (%v)", cfg.Summarizer.Mode, got.Model, got.BaseURL, err)
+		}
+	})
 	// The file keeps part of a route for a summarizer that calls nothing:
 	// a model with no address, or an effort under a saved preset that
 	// gives the model. Made dedicated, that part would be the route. It is
