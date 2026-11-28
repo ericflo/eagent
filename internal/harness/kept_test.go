@@ -229,15 +229,13 @@ func TestANewQuestionReplacesTheOpenOne(t *testing.T) {
 }
 
 // One wake may take many calls (clearing a dialog takes several). When the
-// limit stops it with the agent still stuck, eagent gets one more go, and
-// after that the user is told how to reach the terminal.
-func TestAStuckAgentGetsAnotherGoAfterTheCallLimitThenTheUserIsTold(t *testing.T) {
+// limit stops it with the agent still stuck, the user is told how to reach
+// the terminal.
+func TestTheUserIsToldWhenTheCallLimitStopsATurnWithTheAgentStuck(t *testing.T) {
 	if got := config.Defaults().MaxCallsPerTurn; got != 30 {
 		t.Fatalf("the default call limit is %d, want 30 as before", got)
 	}
-	var seen tails
 	s := startSession(t, "", func(_ string, msgs []map[string]any) reply {
-		seen.add(allText(msgs))
 		if msgs[len(msgs)-1]["role"] == "tool" || strings.Contains(allText(msgs), "stuck on something on its screen") {
 			return reply{calls: []event.ToolCall{tc("relay_screen", `{}`)}}
 		}
@@ -256,9 +254,6 @@ func TestAStuckAgentGetsAnotherGoAfterTheCallLimitThenTheUserIsTold(t *testing.T
 		return false
 	})
 	s.settled()
-	if seen.find("You were stopped after 3 calls in a row, and Codex is still stuck on its screen") == "" {
-		t.Fatal("eagent was not given another go after the call limit")
-	}
 	ends := 0
 	for _, ev := range s.events(event.TurnEnd) {
 		var d event.TurnData
@@ -267,8 +262,8 @@ func TestAStuckAgentGetsAnotherGoAfterTheCallLimitThenTheUserIsTold(t *testing.T
 			ends++
 		}
 	}
-	if ends != 2 {
-		t.Fatalf("%d turns ended at the call limit, want 2 (the first and the one more go)", ends)
+	if ends != 1 {
+		t.Fatalf("%d turns ended at the call limit, want 1", ends)
 	}
 	told := 0
 	for _, m := range s.ui.said() {

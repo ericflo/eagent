@@ -155,10 +155,6 @@ type turnState struct {
 	// thing this loop does is write a dossier from its files (resume.go).
 	adopt bool
 
-	// capRuns counts the turns in a row that stopped at the call limit
-	// with an agent still stuck on its screen.
-	capRuns int
-
 	// finalAsked: the closing word of a session with no terminal has been
 	// asked for. finalBusy: that call is in flight (finish waits for it).
 	finalAsked bool
@@ -352,9 +348,6 @@ func (r *Runtime) noteWake(ev event.Event) {
 		return
 	}
 	t.wakes[k] = ev.Seq
-	if k == wakeUser || k == wakeTurnEnd {
-		t.capRuns = 0
-	}
 	if k == wakeUser {
 		// A message of theirs still unanswered stays owed: the look at
 		// what they write now is told about it too (tail.go).
@@ -1053,7 +1046,7 @@ func (r *Runtime) turn(w wake) {
 			r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: reason}))
 		}
 		if end == "call limit" {
-			r.afterCallLimit(maxCalls)
+			r.afterCallLimit()
 		}
 		if asked && end != "error" && end != "interrupted" && end != "timeout" {
 			r.threadAsked(tc.threaded)
@@ -1140,26 +1133,14 @@ func keepsThread(c event.ToolCall) bool {
 
 // afterCallLimit handles a turn that was stopped at the call limit. If an
 // agent is still stuck on its screen, the work of clearing it is not done:
-// eagent is woken once more to carry on, and after that the user is told.
-// Loop goroutine.
-func (r *Runtime) afterCallLimit(maxCalls int) {
-	t := &r.turns
-	var stuck *state.Relay
+// the user is told how to reach it. Loop goroutine.
+func (r *Runtime) afterCallLimit() {
 	for _, rel := range r.st.ActiveRelays() {
 		if rel.State == "blocked" {
-			stuck = rel
-			break
+			r.recordMessage(event.MessageData{Auto: true, Important: true, Text: fmt.Sprintf("%s is stuck on something on its screen and I could not clear it. You can look and type into it with `eagent relays attach %s`.", rel.Who(), rel.Name)})
+			return
 		}
 	}
-	if stuck == nil {
-		return
-	}
-	t.capRuns++
-	if t.capRuns <= 1 {
-		r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf("You were stopped after %d calls in a row, and %s is still stuck on its screen. Read the screen once more and either clear it or ask the user; do not repeat what has not worked.", maxCalls, stuck.Who())}))
-		return
-	}
-	r.recordMessage(event.MessageData{Auto: true, Important: true, Text: fmt.Sprintf("%s is stuck on something on its screen and I could not clear it. You can look and type into it with `eagent relays attach %s`.", stuck.Who(), stuck.Name)})
 }
 
 // stillClosing reports whether the session a closing turn was made for is
