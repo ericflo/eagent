@@ -88,70 +88,21 @@ func TestRelayReportReachesRecordAndPhoneWhole(t *testing.T) {
 	}
 }
 
-// A report too long for one FinaleChat message is posted in parts that each
-// fit, in order, that say which part they are on their last line, and that
-// together are the whole report.
-func TestRelayReportTooLongForOnePostIsSplit(t *testing.T) {
+// A report too long for one post is clipped at a line's end and says so;
+// the record keeps all of it.
+func TestRelayReportTooLongForOnePostIsClipped(t *testing.T) {
 	line := strings.Repeat("x", 99) + "\n"
 	report := strings.Repeat(line, 3000) + "END" // about 300 KB
 	rt, fp := relayReportSession(t, report, 20000)
-	waitFor(t, "the report's parts", func() bool { return len(relayReports(fp)) == 3 })
+	waitFor(t, "the report's post", func() bool { return len(relayReports(fp)) == 1 })
 	if got := recordedReport(t, rt); got != report {
 		t.Fatalf("the record kept %d of %d bytes", len(got), len(report))
 	}
-	var bodies []string
-	keys := map[string]bool{}
-	for i, p := range relayReports(fp) {
-		body, _ := p["body"].(string)
-		if len(body) > phoneReportPart || len(body) > 256<<10 {
-			t.Fatalf("part %d is %d bytes", i+1, len(body))
-		}
-		tail := "\n\n_(part " + string(rune('1'+i)) + " of 3)_"
-		if !strings.HasSuffix(body, tail) || strings.HasPrefix(body, "_(") {
-			t.Fatalf("part %d starts %q and ends %q", i+1, body[:30], body[len(body)-30:])
-		}
-		meta, _ := p["meta"].(map[string]any)
-		if meta["part"] != float64(i+1) || meta["parts"] != float64(3) {
-			t.Errorf("part %d meta %v/%v", i+1, meta["part"], meta["parts"])
-		}
-		key, _ := p["client_key"].(string)
-		if keys[key] {
-			t.Errorf("part %d reuses the client key %q", i+1, key)
-		}
-		keys[key] = true
-		bodies = append(bodies, body)
-	}
-	if joined := unsplit(t, bodies); joined != report {
-		t.Fatalf("the parts join to %d bytes, want the %d of the report", len(joined), len(report))
-	}
-}
-
-// A code block cut between two parts is closed and opened again, and a
-// line with no break in it is still cut inside the limit, never inside a
-// UTF-8 sequence.
-func TestSplitReportKeepsCodeBlocksAndRunes(t *testing.T) {
-	report := "Here is the diff:\n```\n" + strings.Repeat("+ a line of code\n", 40) + "```\nDone."
-	parts := splitReport(report, 400)
-	if len(parts) < 2 {
-		t.Fatalf("%d parts", len(parts))
-	}
-	for i, p := range parts {
-		if len(p) > 400 {
-			t.Errorf("part %d is %d bytes", i+1, len(p))
-		}
-		if n := strings.Count(p, "```"); n%2 != 0 {
-			t.Errorf("part %d leaves a code block open:\n%s", i+1, p)
-		}
-	}
-	long := strings.Repeat("é", 1000) // no line breaks, two bytes a rune
-	for i, p := range splitReport(long, 301) {
-		body := partMarker.ReplaceAllString(p, "")
-		if len(p) > 301 || !strings.HasSuffix(body, "é") {
-			t.Errorf("part %d: %d bytes, ends %q", i+1, len(p), body[len(body)-2:])
-		}
-	}
-	if got := splitReport("short", 400); len(got) != 1 || got[0] != "short" {
-		t.Errorf("a short report: %q", got)
+	body, _ := relayReports(fp)[0]["body"].(string)
+	const note = "\n\n_(clipped; the whole report is in the session's record)_"
+	kept := strings.TrimSuffix(body, note)
+	if kept == body || len(kept) > phoneReportMax || !strings.HasPrefix(report, kept+"\n") || len(kept) < phoneReportMax-200 {
+		t.Fatalf("the post is %d bytes and ends %q; want the report's first lines up to the bound, then the note", len(body), body[len(body)-70:])
 	}
 }
 

@@ -2,7 +2,6 @@ package harness
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -261,60 +260,34 @@ func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 		if images == nil {
 			images = []string{}
 		}
-		// The whole report, in as many posts as FinaleChat needs to take
-		// it. Every part is a report of this agent; the first keeps the key
-		// and the buzz a single post had, and the figures about the turn
-		// ride on the last, so a reader that shows them per post shows
-		// them once, under the end of the report.
-		buzz := r.relayNotifyDone[d.Name]
-		if buzz {
+		// One post. A report too long for FinaleChat to take is clipped at
+		// a line's end and says so: the whole of it is in the record.
+		if len(body) > phoneReportMax {
+			cut := strings.LastIndexByte(body[:phoneReportMax], '\n')
+			if cut <= 0 {
+				for cut = phoneReportMax; !utf8.RuneStart(body[cut]); cut-- {
+				}
+			}
+			body = strings.TrimRight(body[:cut], "\n") + "\n\n_(clipped; the whole report is in the session's record)_"
+		}
+		req := finalechat.PostRequest{Body: body, Notify: boolPtr(false),
+			Meta: map[string]any{"eagent": "relay", "kind": "relay_report", "relay": d.Name, "agent": agent, "duration_ms": d.DurationMS, "tools": d.Tools, "interrupted": d.Interrupted, "images": images, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}}
+		if r.relayNotifyDone[d.Name] {
 			delete(r.relayNotifyDone, d.Name)
+			req.Notify, req.Importance = nil, "important"
 			r.publishRelayMeta()
 		}
-		parts := splitReport(body, phoneReportPart)
-		reqs := make([]finalechat.PostRequest, len(parts))
-		keys := make([]string, len(parts))
-		for i, part := range parts {
-			keys[i] = strconv.FormatInt(ev.Seq, 10)
-			if i > 0 {
-				keys[i] += "." + strconv.Itoa(i+1)
-			}
-			meta := map[string]any{"eagent": "relay", "kind": "relay_report", "relay": d.Name, "agent": agent, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}
-			if i == len(parts)-1 {
-				meta["duration_ms"], meta["tools"], meta["interrupted"], meta["images"] = d.DurationMS, d.Tools, d.Interrupted, images
-			}
-			if len(parts) > 1 {
-				meta["part"], meta["parts"] = i+1, len(parts)
-			}
-			reqs[i] = finalechat.PostRequest{Body: part, Notify: boolPtr(false), Meta: meta}
-			if buzz && i == 0 {
-				reqs[i].Notify, reqs[i].Importance = nil, "important"
-			}
-		}
-		// One work item for the whole report, so a full queue takes all of
-		// it or none (and says so), and nothing queued later lands between
-		// its parts. The parts go in order; one the server will not take
-		// stops the rest, since a part after a gap would read as if it
-		// followed what came before, and the shortfall is said.
 		queued := p.enqueue(func(ctx context.Context) {
-			for i := range reqs {
-				req := reqs[i]
-				// The key and the status are read here, on the worker: until
-				// the first call has learned what the server supports, a key
-				// made on the loop would be empty, and the post would lose
-				// both its idempotency and its patient retries. An agent's
-				// post without a status clears the thread's line, so each
-				// part carries the one the work is in, as a message does.
-				req.ClientKey = p.key("rt", keys[i])
-				act := p.attach()
-				req.Activity = act
-				msg, thread, err := p.client.Post(ctx, p.ref, req)
-				if err != nil {
-					if len(reqs) > 1 {
-						p.say("finalechat: %s's report (event %d) reached the phone in %d of %d parts: %v; the whole report is in the session's record", agent, ev.Seq, i, len(reqs), shortErr(err))
-					}
-					return
-				}
+			// The key and the status are read here, on the worker: until
+			// the first call has learned what the server supports, a key
+			// made on the loop would be empty, and the post would lose
+			// both its idempotency and its patient retries. An agent's
+			// post without a status clears the thread's line, so it
+			// carries the one the work is in, as a message does.
+			req.ClientKey = p.key("rt", strconv.FormatInt(ev.Seq, 10))
+			act := p.attach()
+			req.Activity = act
+			if msg, thread, err := p.client.Post(ctx, p.ref, req); err == nil {
 				p.rememberIn(msg, thread)
 				p.markSent(act)
 			}
@@ -325,130 +298,11 @@ func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 	}
 }
 
-// phoneReportPart bounds one post of an agent's report. FinaleChat refuses
+// phoneReportMax bounds the post of an agent's report. FinaleChat refuses
 // a message body over 256 KiB and a request over 1 MiB, and JSON can write
-// one byte of the body as six ("<" is \u003c), so a part of 128 KiB is
-// taken whatever it holds.
-const phoneReportPart = 128 << 10
-
-// splitReport cuts a report too long for one post into parts of at most
-// limit bytes, at line ends where it can and never inside a UTF-8
-// sequence. When there are several, each ends with "(part i of n)" on a
-// line of its own after a blank line, so its first line is the report's
-// own words (the line a list shows and a reply quotes). A code block cut
-// in two is closed at the end of one part and opened again at the start
-// of the next with the same fence and language, so each part reads on
-// its own.
-func splitReport(body string, limit int) []string {
-	if len(body) <= limit {
-		return []string{body}
-	}
-	const marker = 32 // room for "\n\n_(part i of n)_"
-	var parts []string
-	fence, open := "", "" // the code block open where the rest starts
-	lineStart := true     // the rest starts at the start of a line
-	for rest := body; rest != ""; {
-		head := ""
-		if open != "" {
-			head = open + "\n"
-			if len(head) > limit/4 {
-				head = fence + "\n" // an info string too long to repeat
-			}
-		}
-		room := limit - marker
-		budget := room - len(head)
-		var part, nextFence, nextOpen string
-		var cut int
-		for {
-			cut = reportCut(rest, budget)
-			chunk := rest[:cut]
-			nextFence, nextOpen = reportFences(chunk, lineStart, fence, open)
-			part = head + chunk
-			if nextFence != "" && cut < len(rest) {
-				if !strings.HasSuffix(chunk, "\n") {
-					part += "\n"
-				}
-				part += nextFence
-			}
-			if len(part) <= room || budget <= 1 {
-				break
-			}
-			budget -= len(part) - room
-		}
-		lineStart = strings.HasSuffix(rest[:cut], "\n")
-		rest = rest[cut:]
-		fence, open = nextFence, nextOpen
-		parts = append(parts, part)
-	}
-	for i := range parts {
-		parts[i] += fmt.Sprintf("\n\n_(part %d of %d)_", i+1, len(parts))
-	}
-	return parts
-}
-
-// reportCut is where the next part of rest ends: all of it when it fits,
-// else at the last line end in the second half of the budget, else at the
-// budget, moved back to the start of a UTF-8 sequence. Never 0.
-func reportCut(rest string, budget int) int {
-	if len(rest) <= budget {
-		return len(rest)
-	}
-	if budget < 1 {
-		budget = 1
-	}
-	cut := budget
-	if i := strings.LastIndexByte(rest[:cut], '\n'); i >= budget/2 {
-		return i + 1
-	}
-	for cut > 0 && !utf8.RuneStart(rest[cut]) {
-		cut--
-	}
-	if cut == 0 {
-		_, cut = utf8.DecodeRuneInString(rest)
-	}
-	return cut
-}
-
-// reportFences follows fenced code blocks through text, as CommonMark
-// reads them: a line of three or more backticks or tildes (indented at
-// most three spaces) opens one, with what follows as its info string, and
-// only a line of the same character, at least as long and with nothing
-// after it, closes it. fence and open are the block open where text
-// starts (its fence and its whole opening line); the result is the block
-// open where it ends. Only whole lines count: a piece of a line cut
-// between parts is not read (a fence line is short, so it is never the
-// line a cut falls inside).
-func reportFences(text string, lineStart bool, fence, open string) (string, string) {
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		if (i == 0 && !lineStart) || i == len(lines)-1 {
-			// The end of a line the last part began, or what follows the
-			// last line end: "" or the start of a line the next part ends.
-			continue
-		}
-		s := strings.TrimLeft(line, " ")
-		if len(line)-len(s) > 3 || len(s) < 3 || (s[0] != '`' && s[0] != '~') {
-			continue
-		}
-		n := 0
-		for n < len(s) && s[n] == s[0] {
-			n++
-		}
-		if n < 3 {
-			continue
-		}
-		switch {
-		case fence == "":
-			if s[0] == '`' && strings.ContainsRune(s[n:], '`') {
-				continue // inline code, not a fence
-			}
-			fence, open = s[:n], strings.TrimRight(line, " \t\r")
-		case s[0] == fence[0] && n >= len(fence) && strings.TrimSpace(s[n:]) == "":
-			fence, open = "", ""
-		}
-	}
-	return fence, open
-}
+// one byte of the body as six ("<" is \u003c), so 128 KiB is taken
+// whatever it holds.
+const phoneReportMax = 128 << 10
 
 // postRelayScreen shows the agent's terminal in the thread. Any goroutine.
 func (p *phone) postRelayScreen(name, screen string) {
