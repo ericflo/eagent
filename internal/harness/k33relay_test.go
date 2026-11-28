@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
+	"github.com/ericflo/eagent/internal/state"
 )
 
 // k33Typed forwards the user's message to the working Codex and waits
@@ -114,5 +116,83 @@ func TestK33ALongMessageTheOldAgentReadIsClipped(t *testing.T) {
 	waitFor(t, "the arrival recorded", func() bool { return k2Outcome(rt, id) == "arrived" })
 	if brief := k33Switch(t, rt, g, seat, next); strings.Contains(brief, "END-read") || !strings.Contains(brief, "read read") {
 		t.Fatalf("a message the old agent read is not quoted clipped: %d bytes of brief", len(brief))
+	}
+}
+
+// k33StuckSeat is a seat whose Send hangs until released, then ends as
+// told: as a real seat's does once its terminal was closed under it
+// (relay.ErrClosed), or typed.
+type k33StuckSeat struct {
+	*k2FeedSeat
+	entered chan string
+	release chan error
+}
+
+func (s *k33StuckSeat) Send(id, text, mode string) (_ string, err error) {
+	defer s.sendStart(id)(&err)
+	s.entered <- text
+	return "", <-s.release
+}
+
+// A message of the user's is being typed into Codex as a switch begins,
+// and its typing outlasts the switch's wait for it (oldSendSettle). The
+// brief, written without it in hand, quotes it whole as a message that
+// waits. When the typing then ended with the terminal closed, the message
+// was recorded as not sent ("the agent is not running"): the model was
+// told it did not go, though the new agent had it whole in the brief, and
+// forwarding it again gave it to the new agent twice. It is left to the
+// brief, as the user's other messages to the old agent are, however its
+// typing ends.
+func TestK33AMessageStillBeingTypedAtASwitchIsLeftToTheBrief(t *testing.T) {
+	saved := oldSendSettle
+	oldSendSettle = 50 * time.Millisecond
+	t.Cleanup(func() { oldSendSettle = saved })
+	for _, c := range []struct {
+		name string
+		ends error
+	}{
+		{"its terminal closed under it", relay.ErrClosed},
+		{"typed as the agent was stopped", nil},
+		{"typed part way", &relay.TypingError{Err: fmt.Errorf("the paste failed")}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			seat := &k33StuckSeat{k2FeedSeat: newK2FeedSeat(t), entered: make(chan string, 1), release: make(chan error, 1)}
+			next := newFakeSeat("two")
+			g := useGatedLaunches(t, []relaySeat{seat, next}, nil)
+			rt := newLaunchRuntime(t)
+			rt.sync(func() {
+				d := event.UserMessageData{Text: "fix the flaky test please", Delivery: "queue"}
+				ev := rt.append(event.New(event.UserMessage, event.ActorUser, d))
+				rel, why := rt.routeUserMessage(d)
+				if rel == nil {
+					t.Errorf("not routed: %s", why)
+					return
+				}
+				rt.forwardUserMessage(rel, ev.Seq, d)
+			})
+			select {
+			case <-seat.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the message was never being typed")
+			}
+			id := lastSendID(rt)
+			switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+			seat.waitGone(t)
+			seat.end()
+			g.release <- struct{}{}
+			recv(t, switched, "switch")
+			waitFor(t, "the brief typed", func() bool { return len(next.sentTexts()) > 0 })
+			if brief := next.sentTexts()[0]; !strings.Contains(brief, "- fix the flaky test please\n") {
+				t.Fatalf("the brief does not quote the message still being typed:\n%s", brief)
+			}
+			seat.release <- c.ends
+			k1QueuesIdle(t, rt)
+			if got := deliveredFor(rt, id); len(got) != 0 || k2Outcome(rt, id) != state.SendWaiting {
+				t.Fatalf("the brief gave the new agent the message whole, and the record says of it %+v (%s); want it left to the brief, with no outcome", got, k2Outcome(rt, id))
+			}
+			if texts := next.sentTexts(); len(texts) != 1 {
+				t.Fatalf("typed into the new agent: %d sends; want the brief alone", len(texts))
+			}
+		})
 	}
 }

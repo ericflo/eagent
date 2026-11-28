@@ -359,6 +359,11 @@ type relayLaunch struct {
 	// is closed once that send is settled: a send cut off by the old
 	// agent's stop then joins held before the new agent is launched.
 	oldIdle <-chan struct{}
+	// carried are the user's sends this start's brief quotes whole, as
+	// messages with no outcome (writeBrief): they are left to the brief.
+	// One still being typed into the old agent then (its typing outlasted
+	// the wait on oldIdle) is settled by nothing when that typing ends.
+	carried map[string]bool
 	// oldDrained is closed once all the old seat saw is on the record
 	// (watchSeat), closed the loop's end. undrained: run went on without it.
 	oldDrained, closed <-chan struct{}
@@ -671,9 +676,17 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 		r.relays.mu.Lock()
 		gone, goneRel := q.gone, q.goneRel
 		q.typing, q.gone, q.goneRel = "", "", nil
+		by := q.movedTo
 		r.relays.mu.Unlock()
 		switch {
 		case h.barrier:
+		case by != nil && by.carried[h.id]:
+			// The switch that took this seat went on without this send's
+			// typing (its bound, oldSendSettle), and its brief quoted the
+			// message whole for the new agent: it is left to the brief, as
+			// the user's other messages to the old agent are (finishLaunch),
+			// and how its typing into the old agent ended is not recorded
+			// as the message's outcome.
 		case res.err != nil:
 			// Under the relay the send is on the record for now: a switch
 			// meanwhile passed it on to the new agent.
@@ -1055,7 +1068,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 			}
 		}
 		job.handover = ho
-		job.brief = r.writeBrief(ho, pending)
+		job.brief, job.carried = r.briefOf(ho, pending)
 	}
 	if rel := r.st.Relays[job.replaces]; job.endOld != "" && rel != nil && rel.Active() {
 		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld}))
@@ -2719,6 +2732,13 @@ func (r *Runtime) handoffBrief(rel *state.Relay) string {
 // handover are quoted once each, oldest first, except those in pending
 // (typed into the new agent on their own after the brief). Loop goroutine.
 func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
+	brief, _ := r.briefOf(ho, pending)
+	return brief
+}
+
+// briefOf is writeBrief, with the sends of the user's that the brief
+// quotes whole because the record has no outcome for them (carried).
+func (r *Runtime) briefOf(ho *handover, pending map[string]bool) (string, map[string]bool) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are taking over this work from %s, which was working in %s.", ho.who, ho.dir)
 	if ho.transcript != "" {
@@ -2750,6 +2770,7 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 	}
 	var texts []quote
 	bySeq := map[int64]int{}
+	carried := map[string]bool{}
 	// The agents the brief hands over from, each the holder of its name
 	// from its start (a name can be in the chain twice, a quick switch
 	// back, each time with the agent that held it then).
@@ -2792,6 +2813,7 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 		if d.From != "user" || quoted[d.ID] || pending[d.ID] || d.Seq > 0 && quotedSeq[d.Seq] {
 			if i, ok := bySeq[d.Seq]; ok && d.From == "user" && d.Seq > 0 && !pending[d.ID] && !r.hasOutcome(d.ID) {
 				texts[i].waits = true // sent again, and this send of it waits
+				carried[d.ID] = true
 			}
 			continue
 		}
@@ -2811,6 +2833,9 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 			bySeq[d.Seq] = len(texts)
 		}
 		texts = append(texts, quote{d.Text, !r.hasOutcome(d.ID)})
+		if !r.hasOutcome(d.ID) {
+			carried[d.ID] = true
+		}
 	}
 	if len(texts) > 12 {
 		earlier := len(texts) - 12
@@ -2832,7 +2857,7 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 		fmt.Fprintf(&b, "\n%s's last report:\n%s\n", ho.reportBy, clipRunes(ho.report, 6000))
 	}
 	b.WriteString("\nCheck the working tree and recent commits, then continue where it left off.")
-	return b.String()
+	return b.String(), carried
 }
 
 // holder is one agent under a relay name: the name and the sequence at
